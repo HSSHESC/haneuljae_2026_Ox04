@@ -16,6 +16,12 @@ const CHASE_UP = 5.0;         // 카트 위 (m)
 const CHASE_LOOK_AHEAD = 4.5; // 시선 전방 오프셋 (m)
 const CHASE_LOOK_UP = 2.0;
 
+// 경사 트랙: 카메라가 노면/지형 아래로 내려가지 않도록 하는 최후 방어선.
+// kart.roadGrade가 없거나 0인 카트(평면 맵, 구버전 kart.js)에서는 절대 발동하지 않는다
+// (CHASE_UP 5.0 / 3.7 > CAM_MIN_ABOVE_KART 이므로 무발동 — 기존 동작과 완전히 동일).
+const CAM_MIN_ABOVE_KART = 2.2;
+const ROAD_GRADE_CLAMP = 0.45; // ±24° — 급경사에서 카메라 리그가 뒤집히지 않도록
+
 const BASE_FOV = 70;
 const BOOST_FOV = 80;
 const COMBINED_FOV = 62;
@@ -60,6 +66,17 @@ function kartForward(kart, out) {
     return out.normalize();
   }
   return out.set(0, 0, -1);
+}
+
+// kartForward + 노면 기울기(kart.roadGrade)를 반영한 3D 전방 단위벡터.
+// roadGrade가 없거나(구버전 kart.js) 유한하지 않은 값이면(평면 맵) y=0 → kartForward와 완전히 동일.
+function kartForward3(kart, out) {
+  kartForward(kart, out);
+  const g = kart && typeof kart.roadGrade === 'number' && Number.isFinite(kart.roadGrade)
+    ? Math.min(ROAD_GRADE_CLAMP, Math.max(-ROAD_GRADE_CLAMP, kart.roadGrade))
+    : 0;
+  out.y = g;
+  return out.normalize();
 }
 
 function kartPosition(kart, out) {
@@ -165,11 +182,14 @@ export class SplitView {
   _updateChase(i, kart, dt) {
     const cam = this.cameras[i];
     kartPosition(kart, _pos);
-    kartForward(kart, _fwd);
+    kartForward3(kart, _fwd);
 
     // 카트 뒤 CHASE_BACK(8.5m) · 위 CHASE_UP(5.0m) — GLB 카트 전고 2.79m를 넘기려 올린 값
     _desired.copy(_pos).addScaledVector(_fwd, -CHASE_BACK);
     _desired.y += CHASE_UP;
+    // 경사 최후 방어선: 카트 바로 위 CAM_MIN_ABOVE_KART(2.2m) 아래로는 내려가지 않는다.
+    // 평면 맵(_fwd.y===0)에서는 CHASE_UP(5.0) > CAM_MIN_ABOVE_KART(2.2)라 항상 무발동.
+    _desired.y = Math.max(_desired.y, _pos.y + CAM_MIN_ABOVE_KART);
     _look.copy(_pos).addScaledVector(_fwd, CHASE_LOOK_AHEAD);
     _look.y += CHASE_LOOK_UP;
 
@@ -203,17 +223,16 @@ export class SplitView {
       kartPosition(a, _pos);
       kartPosition(b, _tmp);
       _mid.copy(_pos).add(_tmp).multiplyScalar(0.5);
-      kartForward(a, _fwd);
-      kartForward(b, _fwdB);
+      kartForward3(a, _fwd);
+      kartForward3(b, _fwdB);
       _fwd.add(_fwdB);
-      if (_fwd.lengthSq() < 1e-4) kartForward(a, _fwd); // 서로 반대 방향이면 P0 기준
-      _fwd.y = 0;
-      _fwd.normalize();
+      if (_fwd.lengthSq() < 1e-4) kartForward3(a, _fwd); // 서로 반대 방향이면 P0 기준
+      else _fwd.normalize();
       spread = _pos.distanceTo(_tmp);
     } else {
       const k = a || b;
       kartPosition(k, _mid);
-      kartForward(k, _fwd);
+      kartForward3(k, _fwd);
       spread = 0;
     }
 
@@ -223,6 +242,8 @@ export class SplitView {
 
     _desired.copy(_mid).addScaledVector(_fwd, -back);
     _desired.y += up;
+    // 경사 최후 방어선(체이스캠과 동일 기준, 두 카트 중점 기준)
+    _desired.y = Math.max(_desired.y, _mid.y + CAM_MIN_ABOVE_KART);
     _look.copy(_mid).addScaledVector(_fwd, 2.0);
     _look.y += 1.0;
 

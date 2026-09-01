@@ -207,19 +207,31 @@ function applyTheme(theme) {
 // 맵마다 크기가 달라 그림자 프러스텀을 트랙 범위에 맞춘다(고정 ±160이면 큰 맵에서 잘림).
 function fitSunToTrack(def) {
   const cps = def.controlPoints;
-  let cx = 0, cz = 0;
-  for (const p of cps) { cx += p[0]; cz += p[1]; }
-  cx /= cps.length; cz /= cps.length;
+  // controlPoints는 [x, z](평면) 또는 [x, y, z](고저차) 두 형식이다 — track.js와 같은
+  // 판별(원소 배열 길이)을 쓴다. 이 구분을 안 하면 [x,y,z] 맵에서 y를 z로 오독해
+  // 그림자 프러스텀이 통째로 어긋난다(에러 없이 조용히 실패 — alpine-pass 실측 z 17.1m 이탈).
+  const dim3 = cps[0].length >= 3;
+  const px = (p) => p[0];
+  const py = (p) => (dim3 ? p[1] : 0);
+  const pz = (p) => (dim3 ? p[2] : p[1]);
+
+  let cx = 0, cz = 0, cy = 0, ymin = Infinity, ymax = -Infinity;
+  for (const p of cps) {
+    cx += px(p); cz += pz(p); cy += py(p);
+    ymin = Math.min(ymin, py(p)); ymax = Math.max(ymax, py(p));
+  }
+  cx /= cps.length; cz /= cps.length; cy /= cps.length;
   let r = 0;
-  for (const p of cps) r = Math.max(r, Math.hypot(p[0] - cx, p[1] - cz));
+  for (const p of cps) r = Math.max(r, Math.hypot(px(p) - cx, pz(p) - cz));
   r = THREE.MathUtils.clamp(r + 45, 120, 320);
 
-  sun.position.set(cx + 120, 180, cz + 60);
-  sun.target.position.set(cx, 0, cz);
+  // 평면 맵에서는 cy = 0, ymax - ymin = 0 이라 아래 네 줄이 기존과 완전히 동일하다.
+  sun.position.set(cx + 120, 180 + cy, cz + 60);
+  sun.target.position.set(cx, cy, cz);
   sun.target.updateMatrixWorld();
   const cam = sun.shadow.camera;
   cam.left = -r; cam.right = r; cam.top = r; cam.bottom = -r;
-  cam.far = 520 + r;
+  cam.far = 520 + r + (ymax - ymin);
   cam.updateProjectionMatrix();
 }
 

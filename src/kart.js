@@ -22,6 +22,15 @@ const KART_RADIUS = 1.2;
 const CATCHUP_LERP = 2.0;         // 견인 배율이 목표로 수렴하는 속도(초당) — 급변 방지
 const CATCHUP_BOOST_SHARE = 0.4;  // 부스트 중에는 견인 효과를 40%만 적용(과속 방지)
 
+// ---- 경사 주행(3D 트랙) ----
+// 평면 맵(모든 노면 y=0)에서는 roadGrade가 항상 0이라 아래 상수들이 모두 항등으로 접힌다.
+const SLOPE_GRAVITY = 14;      // m/s² 경사 성분 가속(아케이드 과장 ≈1.43g). 15% 경사에서 ±2.07
+const SLOPE_TOP_K = 1.2;       // 최고속 보정: 1 - K·grade
+const SLOPE_TOP_MIN = 0.75;    // 오르막 최고속 하한(15% 오르막 ×0.82)
+const SLOPE_TOP_MAX = 1.15;    // 내리막 최고속 상한
+const PITCH_LERP = 8;          // 초당 피치 수렴 속도(노면 y 미세 변동을 흡수)
+const SPEED_ABS_MAX = BOOST_SPEED * 1.2;  // 긴 내리막에서 속도 발산 방지 상한
+
 const PROC_WHEEL_RADIUS = 0.32;   // 절차 생성 바퀴 반지름
 const MODEL_WHEEL_RADIUS = 0.44;  // GLB 바퀴 0.21m × 스케일 2.1
 
@@ -159,6 +168,10 @@ export class Kart {
     }
     this.object3d.add(this._tiltGroup);
 
+    // 노면 피치를 얹기 위해 오일러 순서를 'YXZ'로 고정한다: R = Ry(yaw)·Rx(pitch)·Rz.
+    // quaternion.copy() 보다 반드시 앞에 와야 spawn 자세가 같은 순서로 역해석된다.
+    // pitch=0(평면 맵)이면 순수 yaw라 기존 'XYZ'와 완전히 동일한 회전이다.
+    this.object3d.rotation.order = 'YXZ';
     this.object3d.position.copy(spawn.position);
     this.object3d.quaternion.copy(spawn.quaternion);
     this.position = this.object3d.position;
@@ -172,6 +185,10 @@ export class Kart {
     this.boostTimer = 0;
     this.spinTimer = 0;
     this.starTimer = 0;
+
+    // 노면 경사(읽기 전용 공개 필드). 평면 맵에서는 둘 다 항상 0.
+    this.roadGrade = 0;   // 카트 heading 기준 노면 기울기 dy/d(수평). + = 오르막
+    this.roadY = 0;       // 현재 노면 높이(m)
 
     // 견인(러버밴딩): 선두와 벌어질수록 최고속/가속이 올라간다.
     // 격차 판정은 두 카트를 다 아는 main이 하고, 여기는 배율만 받아 부드럽게 수렴시킨다.
@@ -197,6 +214,7 @@ export class Kart {
     this._crossedStartOnce = false;  // 스폰(출발선 뒤) → 첫 출발선 통과는 랩 증가 없음
     this._spinAngle = 0;
     this._sampleHint = undefined;
+    this._pitch = 0;                 // 시각 피치(rad). roadGrade를 PITCH_LERP로 추종
   }
 
   // 견인 목표 배율 설정(1 = 없음). 즉시 반영이 아니라 update()에서 CATCHUP_LERP로 수렴한다.
@@ -275,6 +293,20 @@ export class Kart {
 
     // 트랙 샘플
     const s = track.sample(this.position, this._sampleHint);
+
+    // ---- 노면 경사 ----
+    // roadDir은 3D 단위 접선(경사 성분 포함)이므로 XZ 길이로 나눠 dy/d(수평)을 얻는다.
+    // 스플라인 진행 방향 기준 기울기를 카트 heading 기준으로 부호 정렬(역주행 대응).
+    // 평면 맵에서는 roadDir.y === 0 → roadGrade 0 → 아래 보정이 전부 항등이다.
+    const rXZ = Math.hypot(s.roadDir.x, s.roadDir.z) || 1;
+    const gradeF = s.roadDir.y / rXZ;
+    const hfx = -Math.sin(this.heading), hfz = -Math.cos(this.heading); // 전방 f = (-sin h, 0, -cos h)
+    const alongSign = (hfx * s.roadDir.x + hfz * s.roadDir.z) < 0 ? -1 : 1;
+    this.roadGrade = gradeF * alongSign;
+    // 최고속 배율: 오르막에서 낮추고 내리막에서 조금 올린다.
+    // 반드시 offRoad 40% 캡 '앞'에 곱한다(계약: offRoad 캡이 마지막에 남아야 한다).
+    topSpeed *= THREE.MathUtils.clamp(1 - SLOPE_TOP_K * this.roadGrade, SLOPE_TOP_MIN, SLOPE_TOP_MAX);
+
     if (s.offRoad) topSpeed *= OFFROAD_FACTOR; // 계약: offRoad면 부스트 중이라도 최고속 40% 제한
 
     if (boosting) {
@@ -297,6 +329,15 @@ export class Kart {
     }
     if (!boosting && this.speed > topSpeed) {
       this.speed += (topSpeed - this.speed) * Math.min(1, 2.5 * dt); // 잔디 진입 등 초과속 감쇠
+    }
+
+    // ---- 경사 중력: 오르막 감속 / 내리막 가속 ----
+    // speed 부호와 무관하게 언덕 아래쪽으로 작용한다(후진 중에도 물리적으로 옳다).
+    // grade가 0(평면 맵)이면 통째로 건너뛰어 기존 속도 시계열을 비트 단위로 보존한다.
+    const slopeAccel = SLOPE_GRAVITY * (this.roadGrade / Math.hypot(1, this.roadGrade));
+    if (slopeAccel !== 0) {
+      this.speed -= slopeAccel * dt;
+      this.speed = THREE.MathUtils.clamp(this.speed, REVERSE_MAX, SPEED_ABS_MAX); // 긴 내리막 발산 방지
     }
 
     // ---- 조향: 속도 비례 (저속에서 약하고, 고속에서 포화) ----
@@ -390,6 +431,7 @@ export class Kart {
       this.wallContact = false;
     }
     this.position.y = s2.roadPoint.y;
+    this.roadY = s2.roadPoint.y;
 
     // ---- 랩/진행도 ----
     const t = s2.t;
@@ -413,7 +455,14 @@ export class Kart {
     this.progress = this.lap + t;
 
     // ---- 시각화 ----
-    this.object3d.rotation.set(0, this.heading + this._spinAngle, 0);
+    // 노면 피치를 감쇠 추종(노면 y의 미세 변동이 차체를 떨게 하지 않도록).
+    // 전방이 로컬 -Z이고 R_x(θ)·(0,0,-1) = (0, sinθ, -cosθ) 이므로 오르막(전방 y>0)은 θ>0.
+    const targetPitch = Math.atan(this.roadGrade);
+    this._pitch += (targetPitch - this._pitch) * Math.min(1, PITCH_LERP * dt);
+    // order = 'YXZ' → yaw 먼저, 그 다음 로컬 X 피치. 평면 맵에서는 _pitch=0 → 기존과 동일.
+    // 롤(뱅킹)은 넣지 않는다 — 도로 리본은 단면이 수평인 능선면이라 물리적 뱅크가 없고,
+    // _tiltGroup.rotation.z는 드리프트 전용으로 남긴다.
+    this.object3d.rotation.set(this._pitch, this.heading + this._spinAngle, 0);
     // 드리프트/조향 기울임
     // rotation.z > 0 은 오른쪽이 들리는 = 왼쪽으로 기우는 롤. 회전 방향으로 기울이므로 부호 반전.
     const targetTilt = this._driftActive ? -this._driftDir * 0.18 : -steer * 0.06;

@@ -7,6 +7,7 @@ const SHELL_SPEED = 25;     // m/s (+ 사용자 속도)
 const SHELL_RADIUS = 0.45;
 const SHELL_HIT_RADIUS = 1.2;
 const SHELL_LIFETIME = 6;   // 초 (안전장치)
+const SHELL_HEIGHT = 0.4;  // 노면 위 셸 중심 높이 (경사에서도 매 프레임 이 높이로 밀착)
 const BANANA_HIT_RADIUS = 1.1;
 const ITEM_TYPES = ['mushroom', 'shell', 'banana', 'star'];
 
@@ -36,7 +37,7 @@ export class ItemSystem {
     const positions = (track && track.itemBoxPositions) || [];
     for (const p of positions) {
       const mesh = new THREE.Mesh(this._boxGeo, this._boxMat);
-      mesh.position.copy(p); // track.itemBoxPositions가 이미 y=1.0으로 띄워서 준다
+      mesh.position.copy(p); // track.itemBoxPositions가 이미 노면 높이(경사 포함) + 1.0으로 띄워서 준다
       scene.add(mesh);
       this.boxes.push({
         mesh,
@@ -93,7 +94,7 @@ export class ItemSystem {
       if (kart.item !== null) continue;
       for (const box of this.boxes) {
         if (!box.active) continue;
-        // 박스는 도로 위 1m에 떠 있고 카트 원점은 노면(y=0)이므로 수평거리로 판정한다.
+        // 박스는 노면 위 1m에 떠 있고, 픽업은 항상 수평(XZ) 거리로 판정한다 — 경사에서도 무관.
         const dx = kart.position.x - box.mesh.position.x;
         const dz = kart.position.z - box.mesh.position.z;
         if (dx * dx + dz * dz < PICKUP_RADIUS * PICKUP_RADIUS) {
@@ -158,7 +159,7 @@ export class ItemSystem {
     const dir = new THREE.Vector3(-Math.sin(kart.heading), 0, -Math.cos(kart.heading));
     const mesh = new THREE.Mesh(this._shellGeo, this._shellMat);
     mesh.position.copy(kart.position);
-    mesh.position.y += 0.4;
+    mesh.position.y = kart.position.y + SHELL_HEIGHT; // kart.position.y는 이미 노면 높이 (경사에서도)
     mesh.position.addScaledVector(dir, 1.8); // 카트 앞에서 시작 (자기 자신 피격 방지)
     this.scene.add(mesh);
     const speed = SHELL_SPEED + Math.max(0, kart.speed);
@@ -177,7 +178,7 @@ export class ItemSystem {
     back.multiplyScalar(-2.2); // 뒤쪽
     const mesh = new THREE.Mesh(this._bananaGeo, this._bananaMat);
     mesh.position.copy(kart.position).add(back);
-    mesh.position.y = kart.position.y + 0.25;
+    mesh.position.y = kart.position.y + 0.25; // kart.position.y는 노면 높이(경사 포함) — 그대로 따라온다
     this.scene.add(mesh);
     this.bananas.push({ mesh, owner: kart, armTimer: 0.6 }); // 설치 직후 주인 무시
   }
@@ -191,10 +192,14 @@ export class ItemSystem {
 
       let dead = s.life <= 0;
 
-      // 벽 충돌: track.sample로 횡방향 오프셋 검사 (전 프레임 인덱스를 힌트로 넘겨 국소 탐색)
+      // 노면 밀착 + 벽 충돌: track.sample로 노면 높이 추종 및 횡방향 오프셋 검사
+      // (전 프레임 인덱스를 힌트로 넘겨 국소 탐색 — 경사 맵에서 매 프레임 y를 갱신해
+      // 언덕을 관통하지 않고 노면 위 SHELL_HEIGHT에 밀착시킨다. 평면 맵은 roadPoint.y가
+      // 항상 0이라 기존과 동일하게 동작한다.)
       if (!dead) {
         const smp = this.track.sample(s.mesh.position, s._sampleHint);
         s._sampleHint = smp.index;
+        s.mesh.position.y = smp.roadPoint.y + SHELL_HEIGHT;
         if (Math.abs(smp.lateral) > smp.halfWidth + 1.5) dead = true;
       }
 

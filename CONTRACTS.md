@@ -1,6 +1,16 @@
-# Kart Game — Module Contracts (v2, as-built)
+# Kart Game — Module Contracts (v3, as-built)
 
 3D 마리오카트풍 2인 대전 레이싱. Three.js, ES modules.
+
+> **v2 → v3 변경 (고저차 트랙 지원)**: 트랙이 더 이상 평면이 아니어도 된다.
+> `controlPoints`가 `[x,z]`(평면)와 `[x,y,z]`(고저차) 두 형식을 받고, `sample()`의
+> `roadPoint.y`가 실제 노면 높이를, `roadDir`이 3D 접선을 돌려준다. 카트는 노면에
+> 붙어 다니고 피치가 들어가며, 경사가 최고속·가속에 반영된다. 고저차 맵은 조각 지형
+> 메시를 만들고, 평면 맵은 기존 원판을 그대로 쓴다.
+> **하위 호환은 값 수준에서 보장된다** — 기존 평면 4맵(green-circuit / sunset-speedway /
+> coastal-grandtour / night-technical)은 지오메트리·머티리얼·스폰·sample()·주행 시계열이
+> v2와 비트 단위로 동일하다(헤드리스 회귀 검증 완료). 아래 표시된 신규 필드는 평면
+> 맵에서 전부 0 또는 기존 값과 같은 항등이다.
 
 > **v1 → v2 변경**: 초기 계약은 "외부 에셋 없음(전부 절차 생성 + WebAudio 합성)"이었으나,
 > 이후 `src/assets.js`가 추가되어 GLB(카트/프롭) · PNG(노면/벽 텍스처) · OGG(효과음/엔진음) · TTF를
@@ -45,16 +55,23 @@ export class Track {
 
   sample(position /*Vector3*/, hint /*샘플 인덱스 0..399, optional*/)
   // → { t,            // 0..1 스플라인 진행도 (가장 가까운 지점)
-  //     roadPoint,    // THREE.Vector3 도로 중심선 위 최근접점
-  //     roadDir,      // THREE.Vector3 그 지점의 주행 방향 단위벡터
-  //     lateral,      // 중심선 기준 부호 있는 횡방향 오프셋(m, 왼쪽 +)
+  //     roadPoint,    // THREE.Vector3. x,z = 중심선 400샘플 중 최근접점 그대로.
+  //                   //   y = 질의 위치(x,z)의 "실제 노면 높이" (평면 맵에서는 항상 0).
+  //                   //   400샘플 y를 그대로 쓰지 않고 리본 표면을 재현해 보간하므로
+  //                   //   경사에서 계단이 생기지 않는다(리본 표면 대비 실측 오차 <3e-5 m).
+  //     roadDir,      // THREE.Vector3 주행 방향 3D 단위벡터. 경사 맵에서는 y != 0 이다.
+  //                   //   ★ XZ 평면 방향이 필요하면 반드시 (x,z)만 뽑아 재정규화할 것.
+  //                   //     dy/d(수평) = roadDir.y / hypot(roadDir.x, roadDir.z).
+  //     lateral,      // 중심선 기준 부호 있는 "수평" 횡방향 오프셋(m, 왼쪽 +).
+  //                   //   경사와 무관한 순수 수평 거리 — 벽 판정 의미가 경사에서 변하지 않는다.
   //     halfWidth,    // 그 지점 도로 반폭(m)
   //     offRoad,      // |lateral| > halfWidth 여부 (boolean)
   //     index }       // 다음 프레임에 hint로 되돌려줄 샘플 인덱스 (0..399)
-  // 구현: 스플라인을 400개 점으로 샘플해 최근접 탐색. hint가 있으면 ±25 국소 창만 보고,
-  //       국소 최선이 40m보다 멀면 전역 재탐색으로 자동 폴백한다.
+  // 구현: 스플라인을 400개 점으로 샘플해 최근접 탐색(수평 투영 기준). hint가 있으면
+  //       ±25 국소 창만 보고, 국소 최선이 40m보다 멀면 전역 재탐색으로 자동 폴백한다.
 
-  readonly itemBoxPositions  // THREE.Vector3[] — 아이템 박스 위치 (4 클러스터 × 3개 = 12개, y=1.0).
+  readonly itemBoxPositions  // THREE.Vector3[] — 아이템 박스 위치 (4 클러스터 × 3개 = 12개).
+                             // y = 그 지점 노면 높이 + 1.0 (평면 맵에서는 1.0).
                              // 박스 메시/회전/리스폰 연출은 ItemSystem이 담당. Track은 위치만 제공.
 
   readonly boostPads         // [{ position: THREE.Vector3, radius: number }]
@@ -63,9 +80,27 @@ export class Track {
   // (main.updateBoostPads: 카트×패드 조합별 1.5초 쿨다운 → kart.applyBoost(1, 1.2)).
   // def.boostPads가 없는 맵은 빈 배열. dispose() 후에도 빈 배열로 리셋된다.
 
+  // --- 고저차(3D) 트랙 ---
+  // def.controlPoints 는 [x, z](평면) 또는 [x, y, z](고저차) 두 형식을 받는다.
+  // 판별은 "원소 배열의 길이"(2 또는 3)뿐이고, 한 맵 안에서 섞으면 생성자가 즉시 throw한다.
+  // 3D 형식이어도 y가 전부 0이면 평면 경로로 떨어져 출력이 [x,z] 맵과 완전히 동일하다.
+  // 평면 맵은 지형 메시를 만들지 않고 기존 CircleGeometry 원판(y=-0.05)을 그대로 쓴다.
+  // 고저차 맵은 단일 PlaneGeometry 조각 지형(드로우콜은 원판과 같은 1개)을 만들고,
+  // 노면 평탄대(halfWidth + 최대 5m) 안에서는 지형이 노면보다 정확히 0.05m 아래에 온다.
+  //
+  // 내부 높이 함수(외부 비공개 — 다른 모듈은 sample().roadPoint.y 로 충분하다):
+  //   _roadY(x,z,hint)        노면 능선면 높이. 평면 맵에서 0.
+  //   _groundY(x,z,hint)      해석적 지형면 높이. 평면 맵에서 -0.05.
+  //   _terrainSurfaceY(x,z)   ★ 실제로 렌더되는 지형 메시 표면 높이.
+  //     지형 격자는 탈루스 완화와 노면 구속(_clampUnderRoad)을 거치므로 해석식 _groundY와
+  //     최대 ±3m까지 어긋난다. 지면에 얹는 오브젝트(나무/바위/GLB 프롭/원경 능선)는
+  //     반드시 이 함수를 써야 한다 — _groundY로 놓으면 파묻히거나 공중에 뜬다.
+  //     평면 맵에서는 격자가 없어 _groundY(≡ -0.05)로 떨어지므로 배치가 기존과 동일하다.
+
   dispose(scene)             // 자기가 add한 것 전부 제거 + 자기가 만든 지오/머티만 해제.
   // GLB 프롭은 clone이라 원본과 지오/머티를 공유 → 씬에서 떼어내기만 하고 dispose하지 않는다.
   // 텍스처도 assets 소유라 해제하지 않는다(맵 전환 시 재사용). itemBoxPositions/boostPads는 []로 리셋.
+  // 지형 높이 격자도 해제한다.
   // main은 맵 전환마다 itemSystem.dispose() → track.dispose(scene) 순으로 부른다.
 }
 ```
@@ -85,6 +120,10 @@ export class Kart {
   // 아케이드 물리: 가속/감속, 속도 비례 조향, 드리프트(drift 누르며 조향 시 미끄러지며
   // 차지 → 3단계 미니터보: 0.8s/1.6s/2.4s 차지 시 놓으면 부스트 0.6s/1s/1.4s).
   // 트랙 처리: track.sample(pos)로 offRoad면 최고속도 40%로 제한(잔디 감속),
+  //   position.y 는 매 프레임 sample().roadPoint.y (실제 노면 높이)로 맞춘다 — 경사 맵에서
+  //   카트가 노면에 붙어 다닌다. 평면 맵에서는 항상 0.
+  //   ★ sample().roadDir 은 3D 단위벡터다(경사 성분 포함). XZ 방향이 필요한 곳에서는
+  //     반드시 재정규화할 것(현재 벽 클램프/슬라이드 코드는 이미 그렇게 한다).
   // |lateral| > halfWidth + 1.5 면 벽으로 간주해 lateral을 클램프한다.
   // 벽 처리는 "정지"가 아니라 **슬라이드**다(v2): 속도의 벽 법선 성분만 제거하고 접선 성분은 남긴 뒤,
   //   heading을 최대 3rad/s로 벽 접선에 정렬하고 스치는 동안 초당 12% 마찰만 준다.
@@ -114,6 +153,21 @@ export class Kart {
   // 벽 접촉 상태 (읽기 전용 — main이 럼블/사운드에 사용)
   wallContact                // 이번 프레임에 벽을 긁고 있는가 (boolean)
   wallHitImpulse             // 접촉 순간의 법선 성분 크기(0..1), 0.25초에 걸쳐 0으로 감쇠
+
+  // 노면 경사 (읽기 전용 — 고저차 맵 지원. 평면 맵에서는 둘 다 항상 정확히 0)
+  roadGrade                  // 카트 heading 기준 노면 기울기 dy/d(수평). + = 오르막.
+                             // sample().roadDir 에서 계산하고 카트 진행 방향으로 부호를 맞춘다
+                             // (역주행하면 부호가 뒤집힌다). 400샘플 인덱스 단위로 양자화돼
+                             // 있어 프레임간 최대 ~0.015의 계단이 있다 — 보간 없이 카메라나
+                             // 이펙트에 직접 먹이면 그 계단이 그대로 보인다.
+  roadY                      // 현재 노면 높이(m). position.y 와 같은 값.
+  // 시각: object3d.rotation.order = 'YXZ' 로 고정하고 rotation.x 에 피치를 넣는다
+  //   (pitch = atan(roadGrade) 를 초당 8의 지수 감쇠로 추종). 평면 맵은 pitch=0 →
+  //   순수 yaw라 기존 'XYZ' 와 완전히 동일한 회전이다. 뱅킹(롤)은 넣지 않는다 —
+  //   rotation.z / _tiltGroup.rotation.z 는 드리프트 기울임 전용이다.
+  // 물리: (a) 최고속 × clamp(1 - 1.2·roadGrade, 0.75, 1.15) — offRoad 40% 캡보다 먼저 적용,
+  //       (b) 중력 성분 speed -= 14 · sin(atan(roadGrade)) · dt, 그 뒤 속도를 [-10, 66]으로 클램프.
+  //       평면 맵에서는 roadGrade가 0이라 (a)는 항등이고 (b)는 통째로 건너뛴다.
 
   // 외부 이벤트
   applyBoost(power /*1=버섯급*/, duration /*초*/)
@@ -168,6 +222,10 @@ export class SplitView {
   render(dt, karts /*[Kart,Kart]*/)
   // 체이스캠: 카트 뒤 8.5m·위 5.0m, 시선 전방 4.5m·위 2.0m (GLB 카트 전고 2.79m를 넘기려
   //   v1의 7m/3.2m에서 올린 값). 부드럽게 추적(lerp), 부스트 시 FOV 살짝 증가.
+  // 경사 대응: 뒤/앞 방향 벡터를 kart.roadGrade(±0.45로 clamp)만큼 기울여 리그 전체를
+  //   노면 경사에 맞춘다 → 내리막에서 카메라가 언덕을 뚫지 않고, 오르막에서 하늘만
+  //   보이지 않는다. 최후 방어선으로 카메라 y >= 카트 y + 2.2m 를 항상 보장한다.
+  //   kart.roadGrade가 없거나(구버전) 0이면(평면 맵) 이 보정은 완전한 항등이다.
   // auto 모드: 두 카트 거리 < 26m → 한 화면(두 카트를 모두 담는 카메라),
   //            > 34m → 세로 2분할(P0 왼쪽, P1 오른쪽). 사이 구간은 히스테리시스,
   //            전환은 0.5s 정도 부드럽게(분할선이 화면 밖에서 미끄러져 들어오는 연출 권장,
@@ -190,6 +248,11 @@ export class ItemSystem {
   // - 카트의 input.useItem 처리는 main이 함: main이 useItem edge 시 itemSystem.use(kart, karts) 호출.
   // - 발사체/설치물 갱신: shell은 전방 직진 25m/s+사용자 속도, 벽/카트 충돌 시 소멸(카트면 spin()),
   //   banana는 뒤에 설치, 밟으면 spin(). star는 kart.setStar(5), mushroom은 kart.applyBoost(1, 1.2).
+  //   shell의 속도는 XZ 전용(y 성분 0)이고, y는 매 프레임 track.sample().roadPoint.y + 0.4로
+  //   덮어써 노면에 밀착한다 — 경사 맵에서 언덕을 관통하지 않는다(벽 판정용 sample 호출을
+  //   재사용하므로 추가 비용 0). 평면 맵에서는 roadPoint.y가 0이라 y가 계속 0.4로 고정된다.
+  //   banana는 kart.position.y + 0.25 — 카트 y가 이미 노면 높이라 자동으로 따라온다.
+  //   박스 픽업 판정은 XZ 거리만 쓰므로 경사와 무관하다.
   // - kart.item 필드는 ItemSystem이 kart 객체에 동적으로 붙여 관리 (Kart 클래스는 모름). 초기 null.
 
   use(kart, allKarts)        // kart.item 사용 후 null로
@@ -256,14 +319,34 @@ export class SettingsMenu {
 ## src/tracks.js  (순수 데이터 — three 비의존, 부작용 없음)
 
 ```js
-export const TRACKS = [ /* 3개 맵 */ ]
-// 원소: { id, name, halfWidth, controlPoints: [[x,z], ...], theme, boostPads: [{t, lateral}] }
+export const TRACKS = [ /* 5개 맵 (평면 4 + 고저차 1) */ ]
+// 원소: { id, name, halfWidth, controlPoints, theme, boostPads: [{t, lateral}] }
 // theme: { road /*textures 키*/, roadTint, wall, sky, fog:{color,near,far}, groundColor,
 //          mountainColor, curbA, curbB, boostColor, decor:'trees'|'rocks'|'none',
 //          props: [{ key /*assets.props 키*/, spacing /*m*/, side /*1|-1|0=교대*/, offset /*m*/, scale? }] }
 //
+// controlPoints는 [x, z](평면) 또는 [x, y, z](고저차) 두 형식을 받는다. 판별은 원소 배열의
+// 길이(2/3)뿐이고, 한 맵 안에서 섞으면 track.js가 즉시 throw한다. 두 형식을 모두 읽는
+// 소비자는 track.js 생성자와 main.js fitSunToTrack 둘뿐이다 — 새로 추가하는 소비자는
+// 반드시 같은 판별을 쓸 것(y를 z로 오독해도 에러가 안 나는 조용한 실패다).
+//
 // controlPoints는 오프라인 수치 검증(최소 곡률반경 > halfWidth+4, 비인접 이격 > 2*halfWidth+4)을
 // 통과한 값이다. **임의로 수정하지 말 것** — 특히 night는 곡률 여유가 0.15m뿐이다.
+// 고저차 맵은 위 XZ 조건에 더해 다음을 만족해야 한다(s = XZ 투영 호길이):
+//   - 최대 기울기 |dy/ds| <= 0.20 (권장 0.18)
+//   - 출발 구간 s ∈ [-25, +30] 에서 |dy/ds| < 0.01
+//     (출발선 타일/게이트/스폰 그리드가 피치 보정 없이 수평으로 놓이기 때문)
+//   - halfWidth + 3.2 < 최소 곡률반경  (지형 평탄대가 코너 안쪽에서 접히지 않게)
+//   - XZ 이격 조건은 고저차가 있어도 그대로 지킬 것 — 지형은 단일 높이장이라
+//     같은 XZ에 두 개의 노면 높이(입체 교차)를 표현할 수 없다.
+//
+// 실측값 (독립 재계산, three 0.170.0):
+//   맵                 halfWidth  3D길이   XZ길이  최소곡률R  최소이격  최대|dy/ds|  고도차
+//   green-circuit          9      411.50  411.50    13.43     36.59      0        0
+//   sunset-speedway       11      465.30  465.30    22.81     44.55      0        0
+//   coastal-grandtour     12      885.31  885.31    20.23     44.10      0        0
+//   night-technical        8      362.70  362.70    12.16     31.78      0        0
+//   alpine-pass           11      746.27  740.21    31.27     44.23    0.1729   35.85m
 ```
 
 ## src/assets.js
@@ -305,6 +388,10 @@ export async function loadAssets(onProgress, audioContext)
 - pause: race 중 pause 입력 → settingsMenu.toggle() + 게임 일시정지(dt 무시).
 - settings.onChange: splitMode → splitView.setMode, volume → audio.setVolume, sensitivity → input에 곱, laps → track.totalLaps 대신 main이 보관하고 kart 생성 시 전달… (laps는 main이 보관, Kart.update 랩 판정은 lap만 올리고 완주 판정은 main이 `kart.lap > laps`로 해도 됨 — 통합 담당 재량, 단 HUD 표기는 일관되게).
 - quality: 'low'면 그림자 끄기 + pixelRatio 1.
+- `fitSunToTrack(def)`: 그림자 카메라를 맵 크기에 맞춘다. **controlPoints의 두 형식을 아는
+  track.js 밖의 유일한 코드**다 — 원소 배열 길이로 [x,z] / [x,y,z]를 판별해 x/z를 뽑고,
+  타깃 y와 `cam.far`에 고도 범위를 반영한다. 판별을 빼면 [x,y,z] 맵에서 y를 z로 오독해
+  그림자 프러스텀이 어긋나는데 **에러가 나지 않는다**(alpine-pass 실측 z 17.1m 이탈).
 
 ## index.html
 
