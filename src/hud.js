@@ -9,6 +9,20 @@ const ITEM_ICONS = {
   star: '⭐',
 };
 
+// 아이템 설명 — 타이틀 가이드와 사용 토스트가 같은 출처를 쓴다.
+// 수치는 items.js/kart.js의 실제 상수와 맞춰 둘 것(버섯 1.2초, 스타 5초, 등껍질 25m/s).
+const ITEM_INFO = {
+  mushroom: { name: '버섯',   color: '#e8593a', short: '1.2초 가속',
+              desc: '즉시 부스트. 코너를 빠져나온 직후에 쓰면 최고속까지 단숨에 붙는다.' },
+  shell:    { name: '등껍질', color: '#3fa85a', short: '전방 발사',
+              desc: '앞으로 곧게 날아가 맞은 카트를 1초 스핀시킨다. 벽에 닿으면 사라진다.' },
+  banana:   { name: '바나나', color: '#e8b23a', short: '뒤에 설치',
+              desc: '바로 뒤에 떨어뜨린다. 밟은 카트는 스핀. 쫓기는 상황에서 쓴다.' },
+  star:     { name: '스타',   color: '#f2d14b', short: '5초 무적',
+              desc: '5초간 무적. 피격되지 않고, 부딪힌 상대를 대신 스핀시킨다.' },
+};
+const ITEM_ORDER = ['mushroom', 'shell', 'banana', 'star'];
+
 function el(tag, className, parent) {
   const e = document.createElement(tag);
   if (className) e.className = className;
@@ -309,6 +323,78 @@ const STYLE = `
   font-weight: 700;
   opacity: 0.85;
 }
+
+/* ── 타이틀: 아이템 효과 안내 ── */
+.hud-title .item-guide {
+  display: flex;
+  gap: 10px;
+  margin-top: 18px;
+  flex-wrap: wrap;
+  justify-content: center;
+  max-width: 760px;
+}
+.hud-title .item-guide .card {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  width: 350px;
+  box-sizing: border-box;
+  padding: 9px 12px;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.42);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-left-width: 4px;
+  text-align: left;
+}
+.hud-title .item-guide .icon {
+  font-size: 26px;
+  line-height: 1.15;
+  flex-shrink: 0;
+}
+.hud-title .item-guide .body { display: flex; flex-direction: column; gap: 2px; }
+.hud-title .item-guide .head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 800;
+}
+.hud-title .item-guide .tag {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.15);
+  white-space: nowrap;
+}
+.hud-title .item-guide .desc {
+  font-size: 12.5px;
+  line-height: 1.45;
+  opacity: 0.82;
+}
+
+/* ── 레이스: 획득/사용 토스트 ── */
+.hud-toast {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 15px;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.62);
+  border: 2px solid rgba(255, 255, 255, 0.28);
+  border-left-width: 5px;
+  font-size: 15px;
+  font-weight: 800;
+  white-space: nowrap;
+  opacity: 0;
+  transform: translateY(-6px) scale(0.96);
+  transition: opacity 0.16s ease, transform 0.16s ease;
+  pointer-events: none;
+}
+.hud-toast.show { opacity: 1; transform: translateY(0) scale(1); }
+.hud-toast .t-icon { font-size: 21px; }
+.hud-toast .t-sub { font-size: 12.5px; font-weight: 700; opacity: 0.78; }
 `;
 
 export class HUD {
@@ -360,9 +446,38 @@ export class HUD {
       'P0(빨강): WASD 이동 · Space 드리프트 · 왼쪽 Shift 아이템<br>' +
       'P1(파랑): 방향키 이동 · 0(메인) 드리프트 · 오른쪽 Shift 아이템<br>' +
       '게임패드: RT 가속 · LT 브레이크 · 좌스틱 조향 · A/RB 드리프트 · X/LB 아이템 · Start 일시정지';
+    // 아이템 효과 안내 — 아이템이 무엇을 하는지 보여줄 곳이 없어 조작이 '먹통'처럼 느껴졌다.
+    const guide = el('div', 'item-guide', this.titleEl);
+    for (const key of ITEM_ORDER) {
+      const info = ITEM_INFO[key];
+      const card = el('div', 'card', guide);
+      card.style.borderLeftColor = info.color;
+      const icon = el('div', 'icon', card);
+      icon.textContent = ITEM_ICONS[key];
+      const body = el('div', 'body', card);
+      const head = el('div', 'head', body);
+      const nm = el('span', null, head);
+      nm.textContent = info.name;
+      nm.style.color = info.color;
+      const tag = el('span', 'tag', head);
+      tag.textContent = info.short;
+      const desc = el('div', 'desc', body);
+      desc.textContent = info.desc;
+    }
+
     this.padCountEl = el('div', 'pad-count', this.titleEl);
     this.padCountEl.textContent = '연결된 게임패드: 0';
     this.titleEl.style.display = 'none';
+
+    // 획득/사용 토스트: 플레이어별 1개. main을 거치지 않고 players[].item 변화로 직접 감지한다.
+    this.toasts = [0, 1].map(() => {
+      const t = el('div', 'hud-toast', this.root);
+      const ic = el('span', 't-icon', t);
+      const tx = el('span', 't-text', t);
+      const sb = el('span', 't-sub', t);
+      return { el: t, icon: ic, text: tx, sub: sb, until: 0 };
+    });
+    this._prevItems = [null, null];
 
     // Results panel
     this.resultsEl = el('div', 'hud-results', this.root);
@@ -429,6 +544,15 @@ export class HUD {
       panel.lap.textContent = `LAP ${Math.min(p.lap, p.totalLaps)}/${p.totalLaps}`;
       panel.speed.textContent = `${Math.round((p.speed || 0) * 3.6)} km/h`;
       panel.itemSlot.textContent = p.item ? (ITEM_ICONS[p.item] || '❓') : '';
+
+      // 아이템 변화 감지: null→X = 획득, X→null = 사용. 레이스 중에만 띄운다.
+      const prev = this._prevItems[i] || null;
+      const cur = p.item || null;
+      if (cur !== prev && state === 'race') {
+        if (cur) this._showToast(i, cur, '획득');
+        else if (prev) this._showToast(i, prev, '사용');
+      }
+      this._prevItems[i] = cur;
       const driftPct = Math.max(0, Math.min(3, p.driftLevel || 0)) / 3 * 100;
       panel.driftFill.style.width = `${driftPct}%`;
 
@@ -449,6 +573,8 @@ export class HUD {
         else panel.el.style.right = '14px';
       }
     });
+
+    this._updateToasts(isSplit, state === 'race');
   }
 
   showResults(results = []) {
@@ -482,6 +608,43 @@ export class HUD {
 
   hideResults() {
     this.resultsEl.style.display = 'none';
+  }
+
+  // 토스트 표시(2.0초). kind: '획득' | '사용'
+  _showToast(i, itemKey, kind) {
+    const t = this.toasts && this.toasts[i];
+    const info = ITEM_INFO[itemKey];
+    if (!t || !info) return;
+    t.icon.textContent = ITEM_ICONS[itemKey] || '❓';
+    t.text.textContent = `${info.name} ${kind}`;
+    t.sub.textContent = kind === '사용' ? info.short : '';
+    t.el.style.borderLeftColor = info.color;
+    t.text.style.color = info.color;
+    t.el.classList.add('show');
+    t.until = (typeof performance !== 'undefined' ? performance.now() : Date.now()) + 2000;
+  }
+
+  // 토스트 위치(분할 여부에 따라 좌/우 절반 안쪽)와 만료를 갱신한다.
+  _updateToasts(isSplit, visible) {
+    if (!this.toasts) return;
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    this.toasts.forEach((t, i) => {
+      if (!visible || now > t.until) t.el.classList.remove('show');
+      t.el.style.top = '86px';
+      if (isSplit) {
+        // 각 반쪽의 가운데 위. 25% / 75% 지점에서 자기 폭의 절반만큼 당긴다.
+        t.el.style.left = i === 0 ? '25%' : '75%';
+        t.el.style.right = 'auto';
+        t.el.style.transform = t.el.classList.contains('show')
+          ? 'translateX(-50%)' : 'translateX(-50%) translateY(-6px) scale(0.96)';
+      } else {
+        // 한 화면일 때는 각자 자기 쪽 가장자리에 붙인다(HUD 패널과 같은 편).
+        t.el.style.left = i === 0 ? '18px' : 'auto';
+        t.el.style.right = i === 0 ? 'auto' : '18px';
+        t.el.style.transform = t.el.classList.contains('show')
+          ? 'none' : 'translateY(-6px) scale(0.96)';
+      }
+    });
   }
 
   showTitle(visible) {
