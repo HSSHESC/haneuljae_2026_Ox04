@@ -57,6 +57,7 @@ export class Track {
 
     let br = 0;
     for (const p of this._pts) br = Math.max(br, Math.hypot(p.x, p.z));
+    this._trackOuterRadius = br;   // 원점~중심선 최대거리 — 산 배치가 트랙을 피하는 데 쓴다
     this._groundRadius = br + 150;
 
     // --- 씬 그룹 ---
@@ -243,16 +244,20 @@ export class Track {
       seed = (seed * 16807) % 2147483647;
       return (seed & 0xffff) / 0xffff;
     };
-    // 링을 지면 원판 안쪽으로 충분히 들여 fog 감쇠 구간에 걸치게 한다.
-    const ringR = this._groundRadius * 0.72;
+    // 트랙 바깥 경계: 원점에서 가장 먼 중심선 점 + 도로 반폭 + 벽/연석 여유.
+    // 능선 밑동이 이 반경 안으로 들어오면 도로 위로 산이 겹쳐 보인다(코스탈 그랜드투어에서 실제 발생).
+    const outer = this._trackOuterRadius + this.halfWidth + 8;
+    // 링은 지면 원판 안쪽(fog 감쇠 구간)에 두되, 트랙이 큰 코스에서는 바깥으로 밀어낸다.
+    const ringR = Math.max(this._groundRadius * 0.72, outer + 60);
     const n = 26;
     for (let k = 0; k < n; k++) {
       const ang = ((k + rand() * 0.5) / n) * Math.PI * 2;
       const rad = ringR * (0.92 + rand() * 0.14);
-      const m = new THREE.Mesh(geo, mat);
       const h = 28 + rand() * 46;
-      // 밑면이 지면 원판 밖으로 삐져나가지 않게 폭 클램프
-      const w = Math.min(50 + rand() * 65, this._groundRadius - rad - 5);
+      // 폭 클램프 3중: 기본 크기 / 지면 원판 밖으로 안 나가게 / 트랙 위로 안 덮치게
+      const w = Math.min(50 + rand() * 65, this._groundRadius - rad - 5, rad - outer);
+      if (w < 12) continue;   // 남는 폭이 없으면 그 자리는 비운다(찌그러진 원뿔을 두지 않는다)
+      const m = new THREE.Mesh(geo, mat);
       m.scale.set(w, h, w);
       m.rotation.y = rand() * Math.PI * 2;
       m.position.set(Math.cos(ang) * rad, -0.05, Math.sin(ang) * rad);
