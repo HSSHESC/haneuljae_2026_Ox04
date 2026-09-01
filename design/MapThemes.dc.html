@@ -1,0 +1,115 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Black+Han+Sans&amp;family=Jua&amp;display=swap">
+  <style>
+    body { margin: 0; font-family: 'Jua', 'Trebuchet MS', sans-serif; }
+    a { color: #b45309; } a:hover { color: #92400e; }
+    .chip { display: flex; flex-direction: column; gap: 3px; align-items: center; }
+    .sw { width: 52px; height: 34px; border: 3px solid #1f2733; border-radius: 8px; }
+    .hex { font-family: 'Consolas', monospace; font-size: 11px; color: #5b6069; }
+    .lbl { font-size: 12px; color: #1f2733; }
+  </style>
+</helmet>
+<div style="width: 1280px; min-height: 760px; box-sizing: border-box; background: #f7f4ec; padding: 34px 40px 40px 40px;">
+  <div style="display: flex; align-items: baseline; gap: 18px; margin-bottom: 8px;">
+    <div style="font-family: 'Black Han Sans', 'Jua', sans-serif; font-size: 40px; color: #1f2733;">맵 테마 3종</div>
+    <div style="font-size: 17px; color: #5b6069;">노면은 공통 밝은 체커 텍스처 × 테마 틴트 — 체커가 살아남는 방식</div>
+  </div>
+  <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px;">
+
+    <!-- 그린 서킷 -->
+    <div style="display: flex; flex-direction: column; gap: 14px; background: #ffffff; border: 4px solid #1f2733; border-radius: 20px; padding: 18px;">
+      <div style="height: 150px; border: 3px solid #1f2733; border-radius: 12px; overflow: hidden; position: relative; background: linear-gradient(180deg, #8ec9f2 0%, #cfeafb 52%, #57b56a 52%, #3f9e4d 100%);">
+        <svg width="340" height="150" viewBox="0 0 340 150" style="position: absolute; top: 0; left: 0;">
+          <path d="M0 82 Q 80 46 160 70 T 340 66" fill="none" stroke="#1f2733" stroke-width="30" stroke-linecap="round"></path>
+          <path d="M0 82 Q 80 46 160 70 T 340 66" fill="none" stroke="#8f959e" stroke-width="24" stroke-linecap="round"></path>
+          <path d="M0 82 Q 80 46 160 70 T 340 66" fill="none" stroke="#f7f4ec" stroke-width="2.5" stroke-dasharray="8 12"></path>
+          <path d="M150 58 l13 2.5 l0 18 l-13 -2.5 z" fill="#e8873a" stroke="#1f2733" stroke-width="2"></path>
+          <circle cx="52" cy="110" r="14" fill="#2e7a3a" stroke="#1f2733" stroke-width="2.6"></circle>
+          <rect x="49.5" y="120" width="5" height="10" fill="#7a4a2b" stroke="#1f2733" stroke-width="1.6"></rect>
+          <circle cx="290" cy="116" r="11" fill="#2e7a3a" stroke="#1f2733" stroke-width="2.6"></circle>
+        </svg>
+      </div>
+      <div style="display: flex; align-items: center; justify-content: space-between;">
+        <div style="font-size: 25px; color: #1f2733;">그린 서킷</div>
+        <div style="font-size: 15px; color: #5b6069;">난이도 ★☆☆ · 기본 서킷</div>
+      </div>
+      <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+        <div class="chip"><div class="sw" style="background: #87c5f0;"></div><div class="lbl">하늘</div><div class="hex">#87c5f0</div></div>
+        <div class="chip"><div class="sw" style="background: #8f959e;"></div><div class="lbl">노면 틴트</div><div class="hex">#8f959e</div></div>
+        <div class="chip"><div class="sw" style="background: #3f9e4d;"></div><div class="lbl">지면</div><div class="hex">#3f9e4d</div></div>
+        <div class="chip"><div class="sw" style="background: #d23c2f;"></div><div class="lbl">연석/벽</div><div class="hex">#d23c2f</div></div>
+        <div class="chip"><div class="sw" style="background: #e8873a;"></div><div class="lbl">부스터 패드</div><div class="hex">#e8873a</div></div>
+      </div>
+      <div style="font-size: 14.5px; color: #5b6069; line-height: 1.6;">완만한 코너, 넓은 시야. 가로등·경고/정지 표지판·나무 스캐터. 밝고 개방적인 축제 분위기 — 첫 플레이 기준 맵.</div>
+    </div>
+
+    <!-- 선셋 스피드웨이 -->
+    <div style="display: flex; flex-direction: column; gap: 14px; background: #ffffff; border: 4px solid #1f2733; border-radius: 20px; padding: 18px;">
+      <div style="height: 150px; border: 3px solid #1f2733; border-radius: 12px; overflow: hidden; position: relative; background: linear-gradient(180deg, #f2a35c 0%, #f6c98e 46%, #d98a4e 46%, #b96f3c 100%);">
+        <svg width="340" height="150" viewBox="0 0 340 150" style="position: absolute; top: 0; left: 0;">
+          <circle cx="272" cy="34" r="20" fill="#ffd968" stroke="#1f2733" stroke-width="3"></circle>
+          <path d="M0 76 L 340 70" fill="none" stroke="#1f2733" stroke-width="34" stroke-linecap="round"></path>
+          <path d="M0 76 L 340 70" fill="none" stroke="#c9a06a" stroke-width="28" stroke-linecap="round"></path>
+          <path d="M0 76 L 340 70" fill="none" stroke="#f7f4ec" stroke-width="2.5" stroke-dasharray="10 14"></path>
+          <path d="M140 60 l15 1.5 l0 20 l-15 -1.5 z M175 62 l15 1.5 l0 20 l-15 -1.5 z" fill="#4dc9b8" stroke="#1f2733" stroke-width="2"></path>
+          <g transform="translate(60, 30)"><rect x="0" y="8" width="5" height="30" fill="#c9c2b2" stroke="#1f2733" stroke-width="1.6"></rect><rect x="42" y="8" width="5" height="30" fill="#c9c2b2" stroke="#1f2733" stroke-width="1.6"></rect><rect x="-2" y="0" width="52" height="14" rx="3" fill="#3f9e4d" stroke="#1f2733" stroke-width="2.4"></rect></g>
+        </svg>
+      </div>
+      <div style="display: flex; align-items: center; justify-content: space-between;">
+        <div style="font-size: 25px; color: #1f2733;">선셋 스피드웨이</div>
+        <div style="font-size: 15px; color: #5b6069;">난이도 ★★☆ · 고속 타원</div>
+      </div>
+      <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+        <div class="chip"><div class="sw" style="background: #f2a35c;"></div><div class="lbl">하늘</div><div class="hex">#f2a35c</div></div>
+        <div class="chip"><div class="sw" style="background: #c9a06a;"></div><div class="lbl">노면 틴트</div><div class="hex">#c9a06a</div></div>
+        <div class="chip"><div class="sw" style="background: #c77b3f;"></div><div class="lbl">지면</div><div class="hex">#c77b3f</div></div>
+        <div class="chip"><div class="sw" style="background: #d97742;"></div><div class="lbl">연석/벽</div><div class="hex">#d97742</div></div>
+        <div class="chip"><div class="sw" style="background: #4dc9b8;"></div><div class="lbl">부스터 패드</div><div class="hex">#4dc9b8</div></div>
+      </div>
+      <div style="font-size: 14.5px; color: #5b6069; line-height: 1.6;">긴 직선 + 시케인 1개, 도로폭 22m. 고속도로 갠트리·신호등, 노을 안개. 부스터 패드가 직선에 깔려 최고속 유지가 관건.</div>
+    </div>
+
+    <!-- 나이트 테크니컬 -->
+    <div style="display: flex; flex-direction: column; gap: 14px; background: #ffffff; border: 4px solid #1f2733; border-radius: 20px; padding: 18px;">
+      <div style="height: 150px; border: 3px solid #1f2733; border-radius: 12px; overflow: hidden; position: relative; background: linear-gradient(180deg, #1b2233 0%, #2a3350 52%, #232c44 52%, #1a2136 100%);">
+        <svg width="340" height="150" viewBox="0 0 340 150" style="position: absolute; top: 0; left: 0;">
+          <circle cx="288" cy="30" r="14" fill="#e8e9f2" stroke="#1f2733" stroke-width="2.5"></circle>
+          <circle cx="60" cy="24" r="1.8" fill="#e8e9f2"></circle><circle cx="120" cy="40" r="1.4" fill="#e8e9f2"></circle><circle cx="200" cy="20" r="1.6" fill="#e8e9f2"></circle>
+          <path d="M0 96 Q 70 40 150 84 Q 220 120 260 70 Q 290 36 340 58" fill="none" stroke="#0e1322" stroke-width="32" stroke-linecap="round"></path>
+          <path d="M0 96 Q 70 40 150 84 Q 220 120 260 70 Q 290 36 340 58" fill="none" stroke="#7a5ae0" stroke-width="25" stroke-linecap="round"></path>
+          <path d="M0 96 Q 70 40 150 84 Q 220 120 260 70 Q 290 36 340 58" fill="none" stroke="#c9c4ec" stroke-width="2.2" stroke-dasharray="8 12"></path>
+          <path d="M198 96 l13 2 l0 17 l-13 -2 z" fill="#59d6c9" stroke="#0e1322" stroke-width="2"></path>
+          <g fill="#e8873a" stroke="#0e1322" stroke-width="1.8"><path d="M96 70 l5 12 l-10 0 z"></path><path d="M126 92 l5 12 l-10 0 z"></path></g>
+        </svg>
+      </div>
+      <div style="display: flex; align-items: center; justify-content: space-between;">
+        <div style="font-size: 25px; color: #1f2733;">나이트 테크니컬</div>
+        <div style="font-size: 15px; color: #5b6069;">난이도 ★★★ · 헤어핀 2</div>
+      </div>
+      <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+        <div class="chip"><div class="sw" style="background: #1b2233;"></div><div class="lbl">하늘</div><div class="hex">#1b2233</div></div>
+        <div class="chip"><div class="sw" style="background: #7a5ae0;"></div><div class="lbl">노면 틴트</div><div class="hex">#7a5ae0</div></div>
+        <div class="chip"><div class="sw" style="background: #232c44;"></div><div class="lbl">지면</div><div class="hex">#232c44</div></div>
+        <div class="chip"><div class="sw" style="background: #d23c2f;"></div><div class="lbl">연석/벽</div><div class="hex">#d23c2f</div></div>
+        <div class="chip"><div class="sw" style="background: #59d6c9;"></div><div class="lbl">부스터 패드</div><div class="hex">#59d6c9</div></div>
+      </div>
+      <div style="font-size: 14.5px; color: #5b6069; line-height: 1.6;">헤어핀 2 + S자, 도로폭 16m, 짙은 안개. 공사 콘이 시케인 마커, 좁은 라인을 부스터 패드로 보상. 드리프트 숙련 맵.</div>
+    </div>
+  </div>
+
+  <div style="margin-top: 22px; display: flex; align-items: center; gap: 14px; background: #1f2733; border-radius: 14px; padding: 12px 20px;">
+    <svg width="22" height="22" viewBox="0 0 24 24"><path d="M13 2 L4 14 h6 l-1 8 L20 9 h-7 z" fill="#e8b23a" stroke="#f7f4ec" stroke-width="1.6" stroke-linejoin="round"></path></svg>
+    <div style="color: #f7f4ec; font-size: 16px;">공통 목표: 3랩 레이스 기준 보통 플레이 약 40초, 드리프트·부스터 최적화 시 약 30초. 부스터 패드는 코너 탈출 직선에 배치.</div>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

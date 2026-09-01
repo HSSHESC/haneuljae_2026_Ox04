@@ -1,0 +1,13 @@
+{
+  "artboards": [
+    { "file": "Main.dc.html", "x": 0, "y": 0, "w": 1280, "h": 720, "title": "타이틀 화면" },
+    { "file": "RaceHUD.dc.html", "x": 1380, "y": 0, "w": 1280, "h": 720, "title": "레이스 HUD (2인 분할)" },
+    { "file": "Results.dc.html", "x": 2760, "y": 0, "w": 1280, "h": 720, "title": "결과 화면" },
+    { "file": "MapThemes.dc.html", "x": 0, "y": 860, "w": 1280, "h": 780, "title": "맵 테마 3종" },
+    { "file": "DirectionNeon.dc.html", "x": 1380, "y": 860, "w": 640, "h": 400, "title": "대안 방향 B (스케치)" }
+  ],
+  "annotations": [
+    { "id": "direction-note", "x": 2120, "y": 860, "w": 300, "text": "채택 방향: 페스티벌 아케이드\n- 게임 실제 값 사용: P1 #d23a2f / P2 #2f6bd2, Kenney Future(숫자·실물 폰트 임베드)\n- 한글: Black Han Sans(로고) + Jua(UI)\n- 두꺼운 잉크 외곽선 + 종이색 패널 + 체커 모티프 = Kenney 로우폴리 카트와 톤 일치\n\n마음에 들면 이 스타일대로 게임 HUD/타이틀 CSS를 교체합니다. 어두운 톤을 원하면 옆의 대안 B를 보세요." }
+  ],
+  "launch": { "view": "canvas" }
+}

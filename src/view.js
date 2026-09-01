@@ -1,0 +1,319 @@
+// src/view.js — 동적 분할화면 (SplitView)
+// 체이스캠 2개 + 두 카트를 모두 담는 합체 카메라.
+// auto 모드는 거리 히스테리시스(26m/34m)로 합체↔세로분할을 전환하고,
+// 전환 0.5s 동안 분할 화면이 좌우 화면 밖에서 미끄러져 들어온다(scissor wipe).
+import * as THREE from 'three';
+
+const MERGE_DIST = 26;        // 이하 → 합체
+const SPLIT_DIST = 34;        // 이상 → 분할 (사이 구간은 직전 상태 유지)
+const TRANSITION_TIME = 0.5;  // s
+
+// GLB 카트 실측 전고 2.79m(assets.js KART_SCALE 2.1 × bbox 1.329m) 기준으로
+// 시야선이 카트 최상단(약 2.79m)보다 위를 지나도록 뒤/위/시선높이를 올렸다.
+// (뒤 8.5, 위 5.0, 시선+2.0 → 카트 위치에서의 시선 높이 ≈ 3.04m, 여유 약 0.25m)
+const CHASE_BACK = 8.5;       // 카트 뒤 (m)
+const CHASE_UP = 5.0;         // 카트 위 (m)
+const CHASE_LOOK_AHEAD = 4.5; // 시선 전방 오프셋 (m)
+const CHASE_LOOK_UP = 2.0;
+
+const BASE_FOV = 70;
+const BOOST_FOV = 80;
+const COMBINED_FOV = 62;
+
+const NEAR = 0.3;
+const FAR = 2000;
+
+const DIVIDER_WIDTH = 2;      // px
+const DIVIDER_COLOR = 0x0b0d12;
+
+// 스크래치 (프레임마다 할당하지 않기 위함)
+const _fwd = new THREE.Vector3();
+const _fwdB = new THREE.Vector3();
+const _pos = new THREE.Vector3();
+const _desired = new THREE.Vector3();
+const _look = new THREE.Vector3();
+const _mid = new THREE.Vector3();
+const _tmp = new THREE.Vector3();
+const _size = new THREE.Vector2();
+const _clearColor = new THREE.Color();
+
+// 프레임레이트 독립 감쇠 보간 계수
+function damp(lambda, dt) {
+  return 1 - Math.exp(-lambda * dt);
+}
+
+function smoothstep(x) {
+  const t = Math.min(1, Math.max(0, x));
+  return t * t * (3 - 2 * t);
+}
+
+// 카트의 전방 단위벡터. kart.heading(=object3d.rotation.y, -Z 전방) 우선.
+function kartForward(kart, out) {
+  const h = kart && kart.heading;
+  if (typeof h === 'number' && Number.isFinite(h)) {
+    return out.set(-Math.sin(h), 0, -Math.cos(h));
+  }
+  if (kart && kart.object3d) {
+    kart.object3d.getWorldDirection(out);
+    out.y = 0;
+    if (out.lengthSq() < 1e-6) out.set(0, 0, -1);
+    return out.normalize();
+  }
+  return out.set(0, 0, -1);
+}
+
+function kartPosition(kart, out) {
+  if (kart && kart.position) return out.copy(kart.position);
+  if (kart && kart.object3d) return out.copy(kart.object3d.position);
+  return out.set(0, 0, 0);
+}
+
+export class SplitView {
+  constructor(renderer, scene) {
+    this.renderer = renderer;
+    this.scene = scene;
+
+    this.mode = 'auto';           // 'auto' | 'split' | 'single'
+    this._splitActive = false;    // auto 히스테리시스의 현재 상태
+    this._blend = 0;              // 0 = 합체, 1 = 분할 (전환 애니메이션)
+
+    this.width = 1;
+    this.height = 1;
+
+    // 플레이어별 체이스캠
+    this.cameras = [0, 1].map(() => {
+      const cam = new THREE.PerspectiveCamera(BASE_FOV, 1, NEAR, FAR);
+      cam.position.set(0, CHASE_UP, CHASE_BACK);
+      return cam;
+    });
+    // 두 카트를 모두 담는 합체 카메라
+    this.combinedCamera = new THREE.PerspectiveCamera(COMBINED_FOV, 1, NEAR, FAR);
+
+    this._camInit = [false, false];
+    this._combinedInit = false;
+    this._camLook = [new THREE.Vector3(), new THREE.Vector3()];
+    this._combinedLook = new THREE.Vector3();
+
+    this._onResize = () => this._resize();
+    window.addEventListener('resize', this._onResize);
+    this._resize();
+  }
+
+  // ── 공개 API ────────────────────────────────────────────────────────────
+  setMode(mode) {
+    if (mode !== 'auto' && mode !== 'split' && mode !== 'single') return;
+    this.mode = mode;
+    if (mode === 'split') this._splitActive = true;
+    else if (mode === 'single') this._splitActive = false;
+  }
+
+  // 현재 화면 레이아웃 ('single' | 'split') — HUD의 splitLayout 용
+  get layout() {
+    return this._blend > 0.5 ? 'split' : 'single';
+  }
+
+  render(dt, karts) {
+    const step = Math.min(Math.max(dt || 0, 0), 0.1);
+    const a = karts && karts[0];
+    const b = karts && karts[1];
+
+    this._updateLayoutTarget(a, b);
+    this._advanceBlend(step);
+
+    if (a) this._updateChase(0, a, step);
+    if (b) this._updateChase(1, b, step);
+    this._updateCombined(a, b, step);
+
+    this._draw();
+  }
+
+  dispose() {
+    window.removeEventListener('resize', this._onResize);
+    this.renderer.setScissorTest(false);
+  }
+
+  // ── 내부 ────────────────────────────────────────────────────────────────
+  _resize() {
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    if (w > 0 && h > 0) this.renderer.setSize(w, h, false);
+    this.renderer.getSize(_size);
+    this.width = Math.max(1, _size.x);
+    this.height = Math.max(1, _size.y);
+  }
+
+  _updateLayoutTarget(a, b) {
+    if (this.mode === 'split') { this._splitActive = true; return; }
+    if (this.mode === 'single') { this._splitActive = false; return; }
+    if (!a || !b) { this._splitActive = false; return; }
+
+    kartPosition(a, _pos);
+    kartPosition(b, _tmp);
+    const d = _pos.distanceTo(_tmp);
+    if (d > SPLIT_DIST) this._splitActive = true;
+    else if (d < MERGE_DIST) this._splitActive = false;
+    // 26~34m 사이는 직전 상태 유지 (히스테리시스)
+  }
+
+  _advanceBlend(dt) {
+    const target = this._splitActive ? 1 : 0;
+    const rate = dt / TRANSITION_TIME;
+    if (this._blend < target) this._blend = Math.min(target, this._blend + rate);
+    else if (this._blend > target) this._blend = Math.max(target, this._blend - rate);
+  }
+
+  _updateChase(i, kart, dt) {
+    const cam = this.cameras[i];
+    kartPosition(kart, _pos);
+    kartForward(kart, _fwd);
+
+    // 카트 뒤 CHASE_BACK(8.5m) · 위 CHASE_UP(5.0m) — GLB 카트 전고 2.79m를 넘기려 올린 값
+    _desired.copy(_pos).addScaledVector(_fwd, -CHASE_BACK);
+    _desired.y += CHASE_UP;
+    _look.copy(_pos).addScaledVector(_fwd, CHASE_LOOK_AHEAD);
+    _look.y += CHASE_LOOK_UP;
+
+    if (!this._camInit[i]) {
+      cam.position.copy(_desired);
+      this._camLook[i].copy(_look);
+      this._camInit[i] = true;
+    } else {
+      const speed = Math.abs(kart.speed || 0);
+      // 빠를수록 조금 더 단단하게 따라붙는다
+      const kPos = damp(5 + speed * 0.08, dt);
+      cam.position.lerp(_desired, kPos);
+      this._camLook[i].lerp(_look, damp(9, dt));
+    }
+    cam.up.set(0, 1, 0);
+    cam.lookAt(this._camLook[i]);
+
+    // 부스트/고속 시 FOV 살짝 증가
+    const boosting = (kart.boostTimer || 0) > 0 ? 1 : 0;
+    const speedT = Math.min(1, Math.abs(kart.speed || 0) / 55);
+    const targetFov = BASE_FOV + (BOOST_FOV - BASE_FOV) * Math.min(1, boosting * 0.75 + speedT * 0.35);
+    cam.fov += (targetFov - cam.fov) * damp(6, dt);
+  }
+
+  _updateCombined(a, b, dt) {
+    const cam = this.combinedCamera;
+    if (!a && !b) return;
+
+    let spread = 0;
+    if (a && b) {
+      kartPosition(a, _pos);
+      kartPosition(b, _tmp);
+      _mid.copy(_pos).add(_tmp).multiplyScalar(0.5);
+      kartForward(a, _fwd);
+      kartForward(b, _fwdB);
+      _fwd.add(_fwdB);
+      if (_fwd.lengthSq() < 1e-4) kartForward(a, _fwd); // 서로 반대 방향이면 P0 기준
+      _fwd.y = 0;
+      _fwd.normalize();
+      spread = _pos.distanceTo(_tmp);
+    } else {
+      const k = a || b;
+      kartPosition(k, _mid);
+      kartForward(k, _fwd);
+      spread = 0;
+    }
+
+    // 두 카트가 화면에 모두 들어오도록 거리/고도를 벌린다
+    const back = CHASE_BACK + 2.5 + spread * 0.62;
+    const up = CHASE_UP + 1.2 + spread * 0.26;
+
+    _desired.copy(_mid).addScaledVector(_fwd, -back);
+    _desired.y += up;
+    _look.copy(_mid).addScaledVector(_fwd, 2.0);
+    _look.y += 1.0;
+
+    if (!this._combinedInit) {
+      cam.position.copy(_desired);
+      this._combinedLook.copy(_look);
+      this._combinedInit = true;
+    } else {
+      cam.position.lerp(_desired, damp(4.5, dt));
+      this._combinedLook.lerp(_look, damp(7, dt));
+    }
+    cam.up.set(0, 1, 0);
+    cam.lookAt(this._combinedLook);
+
+    const boosting = ((a && a.boostTimer > 0) || (b && b.boostTimer > 0)) ? 1 : 0;
+    const targetFov = COMBINED_FOV + boosting * 5 + Math.min(10, spread * 0.12);
+    cam.fov += (targetFov - cam.fov) * damp(5, dt);
+  }
+
+  _setCamera(cam, aspect) {
+    if (cam.aspect !== aspect) {
+      cam.aspect = aspect;
+      cam.updateProjectionMatrix();
+    } else {
+      cam.updateProjectionMatrix();
+    }
+  }
+
+  // viewport는 패널 전체, scissor는 실제로 드러난 부분 → 화면 밖에서 미끄러져 들어오는 연출
+  _renderPanel(cam, vx, vw, sx, sw) {
+    if (sw <= 0.5) return;
+    const r = this.renderer;
+    const h = this.height;
+    this._setCamera(cam, vw / h);
+    r.setViewport(vx, 0, vw, h);
+    r.setScissor(sx, 0, sw, h);
+    r.setScissorTest(true);
+    r.render(this.scene, cam);
+  }
+
+  _drawDivider(x) {
+    const r = this.renderer;
+    const w = DIVIDER_WIDTH;
+    const px = Math.round(Math.min(this.width - w, Math.max(0, x)));
+    r.getClearColor(_clearColor);
+    const prevAlpha = r.getClearAlpha();
+    r.setScissor(px, 0, w, this.height);
+    r.setScissorTest(true);
+    r.setClearColor(DIVIDER_COLOR, 1);
+    r.clear(true, false, false);
+    r.setClearColor(_clearColor, prevAlpha);
+  }
+
+  _draw() {
+    const r = this.renderer;
+    const W = this.width;
+    const H = this.height;
+    const half = W / 2;
+    const p = smoothstep(this._blend);
+
+    if (p <= 0.001) {
+      // 완전 합체
+      r.setScissorTest(false);
+      r.setViewport(0, 0, W, H);
+      this._setCamera(this.combinedCamera, W / H);
+      r.render(this.scene, this.combinedCamera);
+      return;
+    }
+
+    if (p < 0.999) {
+      // 전환 중: 합체 화면을 먼저 깔고, 좌우 분할 패널이 바깥에서 미끄러져 들어온다
+      r.setScissorTest(false);
+      r.setViewport(0, 0, W, H);
+      this._setCamera(this.combinedCamera, W / H);
+      r.render(this.scene, this.combinedCamera);
+    }
+
+    const reveal = half * p;               // 각 패널이 드러난 폭
+    // 좌: 패널 [0, half), 왼쪽 가장자리부터 드러남
+    this._renderPanel(this.cameras[0], 0, half, 0, reveal);
+    // 우: 패널 [half, W), 오른쪽 가장자리부터 드러남
+    this._renderPanel(this.cameras[1], half, half, W - reveal, reveal);
+
+    if (p >= 0.999) {
+      this._drawDivider(half - DIVIDER_WIDTH / 2);
+    } else {
+      this._drawDivider(reveal - DIVIDER_WIDTH);
+      this._drawDivider(W - reveal);
+    }
+
+    r.setScissorTest(false);
+    r.setViewport(0, 0, W, H);
+  }
+}

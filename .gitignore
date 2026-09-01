@@ -1,0 +1,13 @@
+# Kenney 원본 배포 압축본과 압축 해제본 (54MB).
+# 게임이 실제로 쓰는 파일만 assets/ 에 추려 두었으므로 저장소에는 포함하지 않는다.
+# 원본이 필요하면 https://kenney.nl 에서 각 팩을 내려받으면 된다 (CREDITS.md 참고).
+raw/
+
+# 디자인 캔버스 빌드 산출물 (에디터가 통째로 인라인된 2MB 페이지) — 소스(.dc.html)만 추적한다.
+design/haneoul-grand-prix-ui.html
+design/font-b64.txt
+
+# OS / 편집기
+Thumbs.db
+desktop.ini
+.DS_Store
