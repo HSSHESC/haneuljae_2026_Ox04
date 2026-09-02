@@ -23,6 +23,8 @@ const MAP_STORAGE_KEY = 'kart-map';
 const MAP_EDGE_ON = 0.5;   // 이 값을 넘는 순간이 "엣지" (계획 규정)
 const MAP_EDGE_OFF = 0.3;  // 여기까지 돌아와야 다음 엣지를 받는다(히스테리시스)
 
+const MODE_STORAGE_KEY = 'kart-mode';   // 'items' | 'speed'
+
 // ───────────────────────────────── 렌더러 / 씬 ─────────────────────────────────
 
 const canvas = document.getElementById('game');
@@ -99,6 +101,9 @@ let prev = [];               // 효과음 edge 검출용 직전 프레임 스냅
 let mapIndex = 0;
 let mapSteerLatch = 0;       // 0 | -1 | 1 — 맵 선택 스틱 엣지 래치
 
+let gameMode = 'items';      // 'items' | 'speed' — boot()에서 loadGameMode()로 즉시 덮어씀
+let modeBrakeLatch = false;  // 타이틀 모드 전환 브레이크(P0) 엣지 래치
+
 let mapPreviewTimer = null;         // 타이틀 배경 프리뷰 재구축 디바운스 타이머
 const MAP_PREVIEW_DEBOUNCE = 200;   // ms — 맵 연타 중 매 엣지마다 씬을 재구축하지 않도록
 
@@ -149,7 +154,7 @@ function saveMapIndex() {
 function setMapIndex(i, announce) {
   mapIndex = ((i % TRACKS.length) + TRACKS.length) % TRACKS.length;
   saveMapIndex();
-  if (hud) hud.setMapInfo({ name: TRACKS[mapIndex].name });
+  if (hud) hud.setMapInfo({ name: TRACKS[mapIndex].name, difficulty: TRACKS[mapIndex].difficulty ?? 1 });
   if (announce) {
     audio.play('menu');
     scheduleMapPreview();
@@ -184,6 +189,40 @@ function updateMapSelect(rawSteer) {
     }
   } else if (Math.abs(s) < MAP_EDGE_OFF) {
     mapSteerLatch = 0;
+  }
+}
+
+// ───────────────────────────────── 게임 모드 (아이템전 / 스피드전) ─────────────────────────────────
+
+function loadGameMode() {
+  try {
+    const raw = localStorage.getItem(MODE_STORAGE_KEY);
+    return raw === 'speed' ? 'speed' : 'items';
+  } catch (e) { return 'items'; } // 프라이빗 모드 등 — 기본값
+}
+
+function saveGameMode() {
+  try { localStorage.setItem(MODE_STORAGE_KEY, gameMode); } catch (e) { /* 무시 */ }
+}
+
+function setGameMode(m, announce) {
+  gameMode = m === 'speed' ? 'speed' : 'items';
+  saveGameMode();
+  if (itemSystem && typeof itemSystem.setEnabled === 'function') itemSystem.setEnabled(gameMode === 'items');
+  if (hud && typeof hud.setGameMode === 'function') hud.setGameMode(gameMode);
+  if (announce) audio.play('switch');
+}
+
+// 타이틀에서 P0 brake(키보드 S / 패드 LT)의 0.5 상승 엣지로 모드를 순환한다.
+// steer(맵 선택)/anyStartPressed/backPressed 어느 것과도 축이 겹치지 않는 유일한 입력이라 brake를 쓴다
+// (drift는 패드 A/RB에 매핑되어 있어 anyStartPressed와 동시에 눌리는 문제가 있다 — 설계서 §E-3).
+function updateModeSelect(rawBrake) {
+  const b = rawBrake || 0;
+  if (!modeBrakeLatch && b > 0.5) {
+    modeBrakeLatch = true;
+    setGameMode(gameMode === 'items' ? 'speed' : 'items', true);
+  } else if (modeBrakeLatch && b < 0.2) {
+    modeBrakeLatch = false;
   }
 }
 
@@ -246,8 +285,9 @@ function buildTrack(def) {
   applyTheme(def.theme || {});
   fitSunToTrack(def);
   itemSystem = new ItemSystem(scene, track);
+  if (typeof itemSystem.setEnabled === 'function') itemSystem.setEnabled(gameMode === 'items');
   boostPadCooldowns.clear(); // 맵 재구축 시 부스트 패드 쿨다운 초기화(패드 배치가 트랙마다 다르므로)
-  if (hud) hud.setMapInfo({ name: def.name });
+  if (hud) hud.setMapInfo({ name: def.name, difficulty: def.difficulty ?? 1 });
 }
 
 function disposeKarts() {
@@ -332,6 +372,19 @@ function resetItems() {
   itemSystem.shells.length = 0;
   for (const b of itemSystem.bananas) scene.remove(b.mesh);
   itemSystem.bananas.length = 0;
+  // 물풍선/웅덩이(§F) — items.js가 아직 배열을 노출하지 않는 빌드와도 호환되도록 존재 가드.
+  if (Array.isArray(itemSystem.balloons)) {
+    for (const b of itemSystem.balloons) scene.remove(b.mesh);
+    itemSystem.balloons.length = 0;
+  }
+  if (Array.isArray(itemSystem.puddles)) {
+    for (const p of itemSystem.puddles) {
+      scene.remove(p.mesh);
+      if (p.mesh.geometry) p.mesh.geometry.dispose();
+      if (p.mesh.material) p.mesh.material.dispose();
+    }
+    itemSystem.puddles.length = 0;
+  }
 }
 
 // ───────────────────────────────── 설정 반영 ─────────────────────────────────
@@ -396,10 +449,12 @@ function goToTitle() {
   buildKarts();
   resetItems();
   hud.hideResults();
-  hud.setMapInfo({ name: TRACKS[mapIndex].name });
+  hud.setMapInfo({ name: TRACKS[mapIndex].name, difficulty: TRACKS[mapIndex].difficulty ?? 1 });
   // 스틱/키를 꺾은 채로 타이틀에 들어오면 곧바로 맵이 넘어가지 않도록 현재 값으로 래치를 채운다.
   const held = inputManager ? (inputManager.getPlayerInput(0).steer || 0) : 0;
   mapSteerLatch = Math.abs(held) > MAP_EDGE_ON ? (held > 0 ? 1 : -1) : 0;
+  // 브레이크를 밟은 채로 타이틀에 들어오면 곧바로 모드가 전환되지 않도록 래치를 채운다.
+  modeBrakeLatch = (inputManager ? (inputManager.getPlayerInput(0).brake || 0) : 0) > 0.5;
   raceTime = 0;
   state = 'title';
   if (typeof audio.setRaceActive === 'function') audio.setRaceActive(false);
@@ -570,6 +625,7 @@ function frame(now) {
       case 'title':
         // 맵 선택은 시작 판정보다 먼저 — 이번 프레임의 선택이 그대로 확정되도록.
         updateMapSelect(rawA.steer);
+        updateModeSelect(rawA.brake);
         if (startEdge) { audio.play('menu'); startSelectedMap(); }
         break;
 
@@ -596,9 +652,10 @@ function frame(now) {
         collideKarts(karts[0], karts[1]);
         itemSystem.update(dt, karts);
         updateBoostPads(dt);
-        // 아이템 사용은 main이 중계 (useItem은 edge)
+        // 아이템 사용은 main이 중계 (useItem은 edge). 스피드전은 아이템이 없으므로 가드해
+        // 효과음이 중복 재생되지 않게 한다(itemSystem.use()는 disabled 시 no-op이지만 'use' 음은 여기서 낸다).
         for (let i = 0; i < karts.length; i++) {
-          if (inputs[i].useItem && karts[i].item && !karts[i].finished) {
+          if (gameMode === 'items' && inputs[i].useItem && karts[i].item && !karts[i].finished) {
             itemSystem.use(karts[i], karts);
             audio.play('use');
           }
@@ -705,7 +762,9 @@ async function boot() {
     applySettings(settingsMenu.settings);   // 초기 반영은 'switch' 음 없이
 
     mapIndex = loadMapIndex();
+    gameMode = loadGameMode();
     buildTrack(TRACKS[mapIndex]);
+    if (typeof hud.setGameMode === 'function') hud.setGameMode(gameMode);
     goToTitle();
 
     hideLoader();

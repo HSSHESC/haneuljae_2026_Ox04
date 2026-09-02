@@ -22,6 +22,15 @@ const KART_RADIUS = 1.2;
 const CATCHUP_LERP = 2.0;         // 견인 배율이 목표로 수렴하는 속도(초당) — 급변 방지
 const CATCHUP_BOOST_SHARE = 0.4;  // 부스트 중에는 견인 효과를 40%만 적용(과속 방지)
 
+// ---- 물풍선(슬립) ----
+// slipTimer > 0 인 동안: 조향 권한이 줄고(스핀과 달리 조작은 가능), 요레이트가 슬립각으로
+// 크게 변환되어 차체가 게걸음치듯 밀려나가며, 속도가 서서히 빠진다. slipTimer=0이면 아래
+// 네 상수 전부가 기존 식과 값 수준으로 동일해지도록 설계되어 있다(steerAuth=1, slipLerp=6, drag 미적용).
+const SLIP_STEER_MUL = 0.45;   // 슬립 중 조향 권한
+const SLIP_SLIDE     = 0.42;   // 요레이트 -> 슬립각 변환 계수 (s)
+const SLIP_LERP      = 2.0;    // 슬립각 수렴 속도 (평상시 6)
+const SLIP_DRAG      = 0.90;   // 슬립 중 초당 잔존 속도 비율
+
 // ---- 경사 주행(3D 트랙) ----
 // 평면 맵(모든 노면 y=0)에서는 roadGrade가 항상 0이라 아래 상수들이 모두 항등으로 접힌다.
 const SLOPE_GRAVITY = 14;      // m/s² 경사 성분 가속(아케이드 과장 ≈1.43g). 15% 경사에서 ±2.07
@@ -185,6 +194,7 @@ export class Kart {
     this.boostTimer = 0;
     this.spinTimer = 0;
     this.starTimer = 0;
+    this.slipTimer = 0;   // 물풍선/웅덩이로 인한 접지력 상실(스핀이 아니라 조향이 둔해지는 것). 읽기 전용 공개 필드.
 
     // 노면 경사(읽기 전용 공개 필드). 평면 맵에서는 둘 다 항상 0.
     this.roadGrade = 0;   // 카트 heading 기준 노면 기울기 dy/d(수평). + = 오르막
@@ -240,6 +250,12 @@ export class Kart {
     this.starTimer = Math.max(this.starTimer, duration);
   }
 
+  // 물풍선 직격/웅덩이 통과: 접지력 상실. 스타 무적 중에는 spin()과 동일하게 무시한다.
+  applySlip(duration) {
+    if (this.starTimer > 0) return;
+    this.slipTimer = Math.max(this.slipTimer, duration);
+  }
+
   _endDrift(release) {
     if (release && this.driftLevel > 0) {
       this.applyBoost(1, DRIFT_BOOST_DUR[this.driftLevel - 1]);
@@ -256,7 +272,9 @@ export class Kart {
     // 타이머
     if (this.boostTimer > 0) this.boostTimer = Math.max(0, this.boostTimer - dt);
     if (this.starTimer > 0) this.starTimer = Math.max(0, this.starTimer - dt);
+    if (this.slipTimer > 0) this.slipTimer = Math.max(0, this.slipTimer - dt);
     if (this.wallHitImpulse > 0) this.wallHitImpulse = Math.max(0, this.wallHitImpulse - dt / WALL_RUMBLE_DUR);
+    const slipping = this.slipTimer > 0;
 
     const controllable = this.spinTimer <= 0 && !this.finished;
     const throttle = controllable ? input.throttle : 0;
@@ -307,6 +325,10 @@ export class Kart {
     // 반드시 offRoad 40% 캡 '앞'에 곱한다(계약: offRoad 캡이 마지막에 남아야 한다).
     topSpeed *= THREE.MathUtils.clamp(1 - SLOPE_TOP_K * this.roadGrade, SLOPE_TOP_MIN, SLOPE_TOP_MAX);
 
+    // 노면 종류 배율(지름길 컷 존 = 거친 노면). 일반 노면은 정확히 1이라 기존 맵은 비트 단위 항등.
+    // offRoad 40% 캡 '앞'에 곱한다(계약: offRoad 캡이 마지막에 남아야 한다).
+    topSpeed *= (s.surfaceFactor !== undefined ? s.surfaceFactor : 1);
+
     if (s.offRoad) topSpeed *= OFFROAD_FACTOR; // 계약: offRoad면 부스트 중이라도 최고속 40% 제한
 
     if (boosting) {
@@ -351,13 +373,20 @@ export class Kart {
     }
     // steer > 0 = 오른쪽 입력. Three.js에서 heading(rotation.y) 증가는 (위에서 볼 때)
     // 반시계 = 왼쪽 회전이므로, 오른쪽으로 돌려면 heading을 감소시켜야 한다.
-    const yawRate = -steer * STEER_RATE * speedFactor * Math.sign(this.speed || 1);
+    // 슬립 중에는 조향 권한이 줄어든다(steerAuth<1) — 조작은 살아있지만 둔해진다. slipTimer=0이면 steerAuth=1로
+    // 정확히 항등이다.
+    const steerAuth = slipping ? SLIP_STEER_MUL : 1;
+    const yawRate = -steer * steerAuth * STEER_RATE * speedFactor * Math.sign(this.speed || 1);
     this.heading += yawRate * dt;
 
-    // 슬립(드리프트 시 바깥으로 미끄러짐): 진행 방향이 차체 방향보다 덜 꺾인다.
-    // 오른쪽 드리프트(_driftDir=+1)는 heading이 감소하므로 진행각은 heading보다 커야 한다.
-    const targetSlip = this._driftActive ? this._driftDir * 0.35 : 0;
-    this._slip += (targetSlip - this._slip) * Math.min(1, 6 * dt);
+    // 슬립(드리프트 시 바깥으로 미끄러짐, 또는 물풍선/웅덩이로 인한 접지력 상실): 진행 방향이
+    // 차체 방향보다 덜 꺾인다. 오른쪽 드리프트(_driftDir=+1)는 heading이 감소하므로 진행각은
+    // heading보다 커야 한다. 물풍선 슬립 중에는 요레이트 크기를 슬립각으로 변환해 차체가 게걸음친다.
+    const targetSlip = this._driftActive
+      ? this._driftDir * 0.35
+      : (slipping ? THREE.MathUtils.clamp(-yawRate * SLIP_SLIDE, -0.5, 0.5) : 0);
+    const slipLerp = slipping ? SLIP_LERP : 6;
+    this._slip += (targetSlip - this._slip) * Math.min(1, slipLerp * dt);
 
     // ---- 스핀 ----
     if (this.spinTimer > 0) {
@@ -365,6 +394,9 @@ export class Kart {
       this._spinAngle = (1 - this.spinTimer) * Math.PI * 2;
       this.speed *= Math.pow(0.2, dt); // 급감
     }
+
+    // 슬립 중 항력(속도가 서서히 빠진다). slipTimer=0이면 미적용.
+    if (slipping) this.speed *= Math.pow(SLIP_DRAG, dt);
 
     // ---- 이동 ----
     const moveAngle = this.heading + this._slip;
@@ -377,7 +409,8 @@ export class Kart {
     this._sampleHint = s2.index; // track.sample()의 hint는 t(0..1)가 아니라 샘플 인덱스(0..399)
     const limit = s2.halfWidth + WALL_MARGIN;
     if (Math.abs(s2.lateral) > limit) {
-      // lateral을 limit로 클램프해 위치 보정 (왼쪽 + : left = (-roadDir.z, 0, roadDir.x), track.js와 동일 정의)
+      // lateral을 limit로 클램프해 위치 보정. left = (-roadDir.z, 0, roadDir.x) — track.js와 동일 정의이고,
+      // 이 벡터가 가리키는 쪽이 +lateral(= 진행방향 기준 오른쪽)이다. 구 주석의 "왼쪽 +"는 오답이었다.
       _v1.set(-s2.roadDir.z, 0, s2.roadDir.x).normalize(); // left 벡터
       const clamped = THREE.MathUtils.clamp(s2.lateral, -limit, limit);
       _v2.copy(s2.roadPoint).addScaledVector(_v1, clamped);

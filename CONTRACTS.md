@@ -1,6 +1,24 @@
-# Kart Game — Module Contracts (v3, as-built)
+# Kart Game — Module Contracts (v4, as-built)
 
 3D 마리오카트풍 2인 대전 레이싱. Three.js, ES modules.
+
+> **v3 → v4 변경 (2층 오버패스 · 가변 폭 · 지름길 · 게임 모드 · 물풍선)**
+> 1. **2층(오버패스)**: `def.overpasses`가 있는 맵에서는 같은 XZ 좌표를 도로가 두 번 지나갈 수 있다.
+>    `sample()`의 최근접 탐색 비용이 `dXZ² + 4·Δy²`가 되어 **질의 `position.y`가 레벨 판별에 쓰인다**.
+>    오버패스가 없는 맵에서는 비용 함수 참조 자체가 v3의 `sqDistXZ` 그대로라 `position.y`가 완전히 무시된다.
+> 2. **가변 폭**: `def.widthProfile`로 halfWidth가 t에 따라 변한다. `sample()`이 좌우 반폭을 따로 돌려준다.
+> 3. **지름길**: `def.shortcuts`로 코너 안쪽 한쪽만 넓힌 "거친 노면" 컷 존. `sample().surfaceFactor`(0.88)가
+>    최고속에 곱해진다. 컷 존 밖과 정상 라인에서는 정확히 1이다.
+> 4. **게임 모드**: 아이템전 / 스피드전. `itemSystem.setEnabled(bool)` + `hud.setGameMode(mode)`.
+> 5. **물풍선**: 5번째 아이템. `kart.applySlip(duration)` / `kart.slipTimer`.
+> 6. **맵 구성 변경**: terrace-valley / coastal-grandtour / caldera-circuit / alpine-pass **삭제**,
+>    harbor-viaduct(난이도 2) / ravine-crossover(난이도 3) **신규**. 기존 3맵은 `difficulty: 1`만 추가.
+> 7. **lateral 부호 규약 정정**: v3까지의 "왼쪽 +"는 **오답**이었다. 실제로는
+>    `left = (-roadDir.z, 0, roadDir.x)`가 **진행방향 기준 오른쪽**을 가리킨다(전방 -Z일 때 +X = 화면 오른쪽).
+>    `steer +1`도 화면 오른쪽이다. 내부 일관성은 v1부터 있었으므로 **동작은 변하지 않았다** — 문서/주석만 정정.
+> **하위 호환은 값 수준에서 보장된다** — green-circuit / sunset-speedway / night-technical 3맵은
+> 지오메트리·머티리얼·스폰·`sample()`·1인/2인 주행 시계열이 v3(HEAD)와 **비트 단위로 동일**하다
+> (헤드리스 회귀 검증 MAXDIFF = 0).
 
 > **v2 → v3 변경 (고저차 트랙 지원)**: 트랙이 더 이상 평면이 아니어도 된다.
 > `controlPoints`가 `[x,z]`(평면)와 `[x,y,z]`(고저차) 두 형식을 받고, `sample()`의
@@ -9,7 +27,9 @@
 > 메시를 만들고, 평면 맵은 기존 원판을 그대로 쓴다.
 > **하위 호환은 값 수준에서 보장된다** — 기존 평면 4맵(green-circuit / sunset-speedway /
 > coastal-grandtour / night-technical)은 지오메트리·머티리얼·스폰·sample()·주행 시계열이
-> v2와 비트 단위로 동일하다(헤드리스 회귀 검증 완료). 아래 표시된 신규 필드는 평면
+> v2와 비트 단위로 동일하다(헤드리스 회귀 검증 완료).
+> *(v4 주: coastal-grandtour는 v4에서 삭제되었다. 남은 회귀 기준선은 green-circuit /
+> sunset-speedway / night-technical 3맵이다.)* 아래 표시된 신규 필드는 평면
 > 맵에서 전부 0 또는 기존 값과 같은 항등이다.
 
 > **v1 → v2 변경**: 초기 계약은 "외부 에셋 없음(전부 절차 생성 + WebAudio 합성)"이었으나,
@@ -30,6 +50,7 @@
 
 - 랩 수: 3
 - 플레이어 수: 2 (P0 = 빨강 카트, P1 = 파랑 카트)
+- 게임 모드: 아이템전(기본) / 스피드전 (v4)
 - 최고 속도: 일반 주행 약 38 m/s, 부스트 시 약 55 m/s
 - 트랙 폭(halfWidth): 약 9 m
 
@@ -53,6 +74,9 @@ export class Track {
                              // 출발선 뒤에 2열 그리드, 전방(주행 방향)을 향함.
                              // quaternion은 lookAt 규약 = 로컬 -Z가 주행 방향.
 
+  readonly maxHalfWidth      // 전 샘플 반폭의 최대값(지형/산/장식/프롭 배치 반경 산정용).
+                             // widthProfile / shortcuts 가 없으면 halfWidth 와 같다.
+
   sample(position /*Vector3*/, hint /*샘플 인덱스 0..399, optional*/)
   // → { t,            // 0..1 스플라인 진행도 (가장 가까운 지점)
   //     roadPoint,    // THREE.Vector3. x,z = 중심선 400샘플 중 최근접점 그대로.
@@ -62,13 +86,38 @@ export class Track {
   //     roadDir,      // THREE.Vector3 주행 방향 3D 단위벡터. 경사 맵에서는 y != 0 이다.
   //                   //   ★ XZ 평면 방향이 필요하면 반드시 (x,z)만 뽑아 재정규화할 것.
   //                   //     dy/d(수평) = roadDir.y / hypot(roadDir.x, roadDir.z).
-  //     lateral,      // 중심선 기준 부호 있는 "수평" 횡방향 오프셋(m, 왼쪽 +).
+  //     lateral,      // 중심선 기준 부호 있는 "수평" 횡방향 오프셋(m).
+  //                   //   ★ 부호 규약(v4 정정): + = left 벡터 (-roadDir.z, 0, roadDir.x) 쪽
+  //                   //     = **진행방향 기준 오른쪽**(전방 -Z일 때 +X = 화면 오른쪽).
+  //                   //     v3까지의 "왼쪽 +"는 오답이다. 동작은 v1부터 이 규약이었다.
   //                   //   경사와 무관한 순수 수평 거리 — 벽 판정 의미가 경사에서 변하지 않는다.
-  //     halfWidth,    // 그 지점 도로 반폭(m)
-  //     offRoad,      // |lateral| > halfWidth 여부 (boolean)
+  //     halfWidth,    // 그 지점 도로 반폭(m). ★ v4: **질의 위치의 lateral 부호 쪽** 반폭이다
+  //                   //   (lateral >= 0 이면 halfWidthPos, 아니면 halfWidthNeg).
+  //                   //   덕분에 kart.js 벽 클램프와 items.js 셸 소멸 판정이 코드 변경 없이
+  //                   //   좌우 비대칭(지름길) 도로에서도 정확해진다. 대칭 구간에서는 항등.
+  //     halfWidthPos, // (v4) +lateral 쪽 반폭(m)
+  //     halfWidthNeg, // (v4) -lateral 쪽 반폭(m)
+  //     offRoad,      // |lateral| > halfWidth 여부 (boolean) — per-side 기준
+  //     surfaceFactor,// (v4) 노면 종류 최고속 배율. **일반 노면은 정확히 1**.
+  //                   //   지름길 컷 존의 가산 폭 영역(|lateral| > 기준 반폭, 그리고 컷 존 쪽)에서만
+  //                   //   SHORTCUT_SURFACE(0.88). kart.js가 offRoad 40% 캡 '앞'에 곱한다.
   //     index }       // 다음 프레임에 hint로 되돌려줄 샘플 인덱스 (0..399)
-  // 구현: 스플라인을 400개 점으로 샘플해 최근접 탐색(수평 투영 기준). hint가 있으면
-  //       ±25 국소 창만 보고, 국소 최선이 40m보다 멀면 전역 재탐색으로 자동 폴백한다.
+  // 구현: 스플라인을 400개 점으로 샘플해 최근접 탐색. hint가 있으면 ±25 국소 창만 보고,
+  //       국소 최선이 40m(비용 40²)보다 멀면 전역 재탐색으로 자동 폴백한다.
+  //
+  // ★ v4 — 질의 position.y 의 의미 (2층 맵에서만):
+  //   def.overpasses 가 있는 맵(_multiLevel === true)에서는 최근접 비용이
+  //     cost = dx² + dz² + LEVEL_W·dy²   (LEVEL_W = 4.0)
+  //   이 되어 **질의 위치의 y가 어느 층인지를 결정한다**. 질의 위치는 자기가 있는 레벨의
+  //   노면 근처 y를 가져야 하며, 아니면 반대 레벨로 스냅될 수 있다.
+  //   오버패스가 없는 맵에서는 비용 함수 참조가 v3의 sqDistXZ 그대로라 **y가 완전히 무시된다**
+  //   (연산 순서까지 동일 → 비트 단위 항등).
+  //   허용 대역 실측(수직 여유 11.55m, 무힌트 전역 탐색): 횡오프셋 0m에서 하단 판정 y<5.78,
+  //   벽 한계 10.5m에서 y<4.58. 하단 카트(y=0)와 셸(y=0.4)은 4m 이상 여유가 있다.
+  //   정상 주행은 hint 국소창(±25 샘플 ≈ ±52m 호길이)만으로 100% 안전하다 — 오버패스의
+  //   두 t는 300m 이상 떨어져 있어 국소창에 상대 레벨이 들어올 수 없다.
+  //   힌트가 없는 경로는 (a) 스폰 첫 프레임, (b) 전역 폴백, (c) 발사체 스폰
+  //   — (c)는 items.js가 스폰 시 sample() 1회로 힌트를 시딩해 이중으로 막는다.
 
   readonly itemBoxPositions  // THREE.Vector3[] — 아이템 박스 위치 (4 클러스터 × 3개 = 12개).
                              // y = 그 지점 노면 높이 + 1.0 (평면 맵에서는 1.0).
@@ -96,6 +145,41 @@ export class Track {
   //     최대 ±3m까지 어긋난다. 지면에 얹는 오브젝트(나무/바위/GLB 프롭/원경 능선)는
   //     반드시 이 함수를 써야 한다 — _groundY로 놓으면 파묻히거나 공중에 뜬다.
   //     평면 맵에서는 격자가 없어 _groundY(≡ -0.05)로 떨어지므로 배치가 기존과 동일하다.
+
+  // --- (v4) 2층 오버패스 ---
+  // def.overpasses = [{ tStart, tEnd }] — **상단(교량 데크) 구간의 t 범위만** 적는다.
+  //   진입/진출 램프는 성토(지형이 따라 올라감)라 포함하지 않는다.
+  //   0 <= tStart < tEnd <= 1 이 아니면 생성자 throw. 데이터 규약은 0.06 < tStart < tEnd < 0.94
+  //   (랩 판정이 t=0 근처 교차에서 깨지지 않도록).
+  // 지형: 신설 _nearestGroundIndex(x,z) 가 **오버패스 span 밖 샘플만** 후보로 삼는다.
+  //   _groundY / _buildTerrain / _clampUnderRoad 세 곳만 이 함수를 쓰고, sample()/_roadY 는 쓰지 않는다
+  //   (노면은 두 레벨 모두 존재해야 하므로). 결과적으로 데크 아래 지형은 하단 노면을 따라가고
+  //   상단 데크는 지형에 아무 구속을 걸지 않는다(교량이 떠 있는 것이 맞다).
+  //   _multiLevel === false 이면 _nearestGroundIndex 는 _nearestIndex 를 그대로 호출한다(항등).
+  // 프롭/깃발/장식은 오버패스 span의 t를 건너뛴다. _buildDecorations의 continue 는
+  //   반드시 minD 검사와 같은 위치에 둔다 — rand() 소비 개수가 바뀌면 기존 3맵의 장식 60개가 전부 이동한다.
+  // 교량 구조물(_buildOverpasses, _buildWalls 직후 호출): 소핏(상판 밑면, 법선 -Y) + 측면 페이샤
+  //   + 난간(데크 위에만) + 교각 + 교대 블록. 전부 _own()/_mat() 등록이라 dispose()가 자동 해제한다.
+  //   교각 밑동은 반드시 _terrainSurfaceY(x,z) - 0.4 에 놓는다(_groundY로 놓으면 최대 ±3m 어긋난다).
+  //   하단 도로를 관통하는 교각은 생략한다.
+  // 수직 여유: DECK_CLEAR = 11.0m (하단 노면 -> 상판 밑면), DECK_THICK = 0.55m.
+  //   상단 노면 = 하단 노면 + 11.55m 이상. 데크 반폭 = halfWidth + WALL_OFF + 0.6.
+  //
+  // --- (v4) 가변 폭 / 지름길 ---
+  // def.widthProfile = [{ t, halfWidth }] — **주기 smoothstep 보간**(Catmull-Rom 금지: 오버슛이
+  //   반폭을 곡률반경 위로 밀어 리본을 접는다). 없으면 전 샘플 def.halfWidth 상수 → 기존 맵 항등.
+  // def.shortcuts = [{ tStart, tEnd, side: -1|+1, extra /*m*/, blend /*m, 기본 20*/ }]
+  //   side +1 = lateral > 0 쪽 = **진행방향 기준 오른쪽**. 좌회전 코너(κ>0) 안쪽은 side: -1.
+  //   가산 폭은 컷 존 **안에서** blend m에 걸쳐 붙었다 떼어진다(존 밖으로 새지 않는다).
+  //   컷 존은 2·blend 이상으로 잡을 것(그보다 짧으면 최대 폭에 도달만 하고 평탄부가 없다).
+  // 저작 상한(생성자가 _validateWidths로 검사, 위반 시 console.warn):
+  //   감폭 |d hw/ds| <= 0.10(선형 평균 기준, smoothstep 첨두는 그 1.5배) / 증폭 <= 0.30
+  //   반폭 >= 5.0m / 출발선 ±30m 구간 반폭 상수 / 샘플별 R_i > _hwMax[i] + 4
+  // 시각: 컷 존 쪽 연석은 생략되고 대신 y=0.012의 거친 노면 스트립 + 진입 셰브론이 그려진다
+  //   (theme.shortcutColor, 기본 0x8a7a58). 벽은 자동으로 바깥으로 부풀어 열린다.
+  // _ribbonGeometry(inner, outer, y, withUV) 는 숫자와 (i)=>number 를 모두 받는다.
+  //   ★ 인덱스 감기 idx.push(a,c,b, b,c,e) 와 불변식 innerOff > outerOff 는 절대 손대지 말 것
+  //     (깨지면 도로 법선이 -Y가 되어 위에서 도로가 안 보인다).
 
   dispose(scene)             // 자기가 add한 것 전부 제거 + 자기가 만든 지오/머티만 해제.
   // GLB 프롭은 clone이라 원본과 지오/머티를 공유 → 씬에서 떼어내기만 하고 dispose하지 않는다.
@@ -130,6 +214,10 @@ export class Kart {
   //   접촉 '순간' 1회에 한해 법선 성분에 비례한 충격 감속(최대 15%)을 추가로 건다.
   // 방향 규약: 전방 f = (-sin(heading), 0, -cos(heading)). steer>0=오른쪽 입력이고
   //   rotation.y 증가는 왼쪽이므로 yawRate = -steer × ... (부호 반전이 정상이다).
+  //   ★ steer +1 = 화면 오른쪽 = sample().lateral 이 커지는 쪽 (헤드리스 직선 스텁으로 실측 확인).
+  // (v4) 노면 종류 배율: topSpeed *= (s.surfaceFactor ?? 1) 를 **offRoad 40% 캡 바로 앞**에
+  //   곱한다. 일반 노면은 정확히 1이라 기존 맵은 IEEE754상 항등(x*1 === x)이다.
+  //   계약 순서: 부스트/견인 → 경사 배율 → surfaceFactor → offRoad 캡(항상 마지막).
   // 바퀴 회전/조향 시각화, 드리프트 시 카트 기울임.
 
   // 상태 (읽기용)
@@ -174,6 +262,15 @@ export class Kart {
   spin()                     // 아이템 피격: 1초 스핀, 속도 급감. star 중이면 무시.
   starTimer                  // >0이면 무적(스타). setStar(duration)로 켬.
   setStar(duration)
+
+  // (v4) 물풍선/웅덩이 — 접지력 상실. **스핀이 아니다**: 조작은 살아 있고 조향이 둔해진다.
+  applySlip(duration)        // starTimer > 0 이면 무시(spin()과 동일 규약). 기존 값과 max로 합쳐진다.
+  slipTimer                  // 읽기 전용, 초. >0인 동안:
+  //   조향 권한 ×0.45 (yawRate에만 곱한다 — steerIn을 0으로 만들지 않는다),
+  //   목표 슬립각 = clamp(-yawRate × 0.42, ±0.5) 이고 수렴 속도가 6 → 2.0으로 느려진다,
+  //   speed *= 0.90^dt 항력.
+  //   실측(38m/s, steer 1): 요레이트 -2.20 → -0.99 rad/s, 선회반경 17.3m → 38.4m, 슬립각 23.8도.
+  //   slipTimer === 0 이면 위 셋이 전부 정확한 항등이라 기존 주행 시계열은 비트 단위로 보존된다.
 }
 
 export function collideKarts(a, b)
@@ -242,9 +339,17 @@ export class ItemSystem {
   constructor(scene, track)
   // track.itemBoxPositions에 회전하는 반투명 큐브 박스 생성. 먹으면 3초 후 리스폰.
 
+  enabled                    // (v4) 아이템전/스피드전 스위치. 기본 true.
+  setEnabled(enabled)        // (v4) false면 박스를 숨기고(_clearProjectiles로 발사체·웅덩이 전부 제거)
+                             // update()와 use()가 즉시 return한다(use는 kart.item도 null로 비운다).
+                             // boxes/shells/bananas/balloons/puddles 배열 자체는 유지된다
+                             // (main.resetItems()가 이 배열들을 직접 순회하므로).
+
   update(dt, karts)
-  // - 박스 픽업 판정(반경 1.6m): 아이템 없는 카트에 랜덤 지급 → kart.item = 'mushroom'|'shell'|'banana'|'star'
-  //   (가중치: 뒤처진 카트에 star/mushroom 확률 ↑ — progress 비교)
+  // - 박스 픽업 판정(반경 1.6m, XZ 거리): 아이템 없는 카트에 랜덤 지급 →
+  //   kart.item = 'mushroom'|'shell'|'banana'|'star'|'balloon'
+  //   가중치(합 1.00): 뒤처짐 [0.32, 0.18, 0.08, 0.26, 0.16] / 선두 [0.22, 0.30, 0.24, 0.06, 0.18]
+  //   (뒤처진 쪽 우대 규약 유지: star 0.26 vs 0.06, mushroom 0.32 vs 0.22)
   // - 카트의 input.useItem 처리는 main이 함: main이 useItem edge 시 itemSystem.use(kart, karts) 호출.
   // - 발사체/설치물 갱신: shell은 전방 직진 25m/s+사용자 속도, 벽/카트 충돌 시 소멸(카트면 spin()),
   //   banana는 뒤에 설치, 밟으면 spin(). star는 kart.setStar(5), mushroom은 kart.applyBoost(1, 1.2).
@@ -255,7 +360,24 @@ export class ItemSystem {
   //   박스 픽업 판정은 XZ 거리만 쓰므로 경사와 무관하다.
   // - kart.item 필드는 ItemSystem이 kart 객체에 동적으로 붙여 관리 (Kart 클래스는 모름). 초기 null.
 
-  use(kart, allKarts)        // kart.item 사용 후 null로
+  // (v4) 물풍선: 포물선으로 던져 착탄점에 물웅덩이를 만든다.
+  //   발사 = 전방 1.6m / +1.0m, 수평 18 + 사용자 속도×0.5, 수직 +9.0, 중력 22 m/s²
+  //   (체공 0.818s, 정점 1.84m, 30m/s 주행 시 도달 27m — 20m 앞 카트를 넘겨 착탄한다).
+  //   파열 조건: 착탄(y <= roadPoint.y + 0.25) / 직격(3D 거리 1.4m, 발사 0.3s간 주인 무시) / 수명 3.0s.
+  //   **수명 초과만 웅덩이를 남기지 않는다.** 직격 시 kart.applySlip(1.6).
+  //   웅덩이: 반경 4.0m, 수명 8.0s, 판정 반경 4.6m. CircleGeometry 17개 정점 각각에
+  //     track.sample()로 노면 높이를 얹어 경사를 따른다(평면 디스크는 18% 경사에서 ±0.72m 파묻힌다).
+  //     depthWrite:false로 z-fighting 원천 차단. 페이드인 0.15s / 페이드아웃 1.0s.
+  //     판정은 매 프레임 XZ 거리 + **높이차 5m 이내**(2층 맵에서 위/아래층 오판 방지).
+  //     지오/재질은 위치 종속이라 웅덩이마다 새로 만들고 소멸 시 dispose 한다.
+  // (v4) 발사체 힌트 시딩: _spawnShell / _spawnBalloon 은 스폰 시 track.sample()을 1회 호출해
+  //   _sampleHint 를 채운다. 2층 맵에서 첫 프레임 무힌트 전역 탐색이 반대 레벨을 잡는 것을 막는다.
+  //   (발사당 400회 비교 1번 — 무시 가능.)
+
+  balloons                   // [{ mesh, vel, owner, life, _sampleHint }]
+  puddles                    // [{ mesh, life, age, owner, ownerGrace }]
+
+  use(kart, allKarts)        // kart.item 사용 후 null로. enabled === false 면 즉시 null로만 비운다.
 }
 ```
 
@@ -275,7 +397,17 @@ export class HUD {
   hideResults()
   showTitle(visible)         // 타이틀 화면: 게임 제목 + "Start 버튼 또는 Enter로 시작" + 조작법 요약 + 연결된 패드 수 표시용 setPadCount(n)
   setPadCount(n)
-  setMapInfo({ name })       // 선택된 맵 이름 — 타이틀의 ◀ 맵명 ▶ 와 레이스 중 상단 배지에 동시 반영
+  setMapInfo({ name, difficulty })
+  // 선택된 맵 이름 — 타이틀의 ◀ 맵명 ▶ 와 레이스 중 상단 배지에 동시 반영.
+  // (v4) difficulty 1|2|3 → 타이틀 맵 이름 아래 ★☆☆ / ★★☆ / ★★★. 생략 시 1. {name}만 넘기는 v3 호출도 동작한다.
+  setGameMode(mode)          // (v4) 'items' | 'speed'. 그 외 값은 'items'로 폴백.
+  // - 타이틀 모드 행(아이템전 / 스피드전)의 강조를 바꾼다. 힌트: "S / LT: 모드 전환"
+  // - speed면 아이템 가이드 카드(this.itemGuideEl)를 display:none
+  // - speed면 update()가 플레이어 패널의 itemSlot을 숨기고 아이템 획득/사용 토스트를 띄우지 않는다
+  //   (_prevItems 갱신은 계속 하므로 모드를 되돌려도 오작동하지 않는다)
+  // - 레이스 중 상단 맵 배지를 "맵명 · 스피드전"으로 병기
+  // ITEM_ICONS / ITEM_INFO / ITEM_ORDER 5종: mushroom 🍄 / shell 🐢 / banana 🍌 / star ⭐ / balloon 💧.
+  // ITEM_INFO는 여전히 가이드 카드와 토스트의 단일 출처다.
 }
 ```
 
@@ -319,8 +451,15 @@ export class SettingsMenu {
 ## src/tracks.js  (순수 데이터 — three 비의존, 부작용 없음)
 
 ```js
-export const TRACKS = [ /* 5개 맵 (평면 4 + 고저차 1) */ ]
-// 원소: { id, name, halfWidth, controlPoints, theme, boostPads: [{t, lateral}] }
+export const TRACKS = [ /* 5개 맵 (평면 3 + 고저차·2층 2) */ ]
+// 원소: { id, name, halfWidth, difficulty, controlPoints, theme, boostPads: [{t, lateral}],
+//         overpasses?, widthProfile?, shortcuts? }
+// difficulty: 1(초심자) | 2(조금 적응) | 3(많이 적응). HUD 타이틀 별표 표시에만 쓰이는 불활성 데이터다
+//   (def를 키 순회하거나 직렬화하는 코드가 코드베이스에 한 곳도 없음을 grep으로 확인).
+// overpasses:   [{ tStart, tEnd }]                                → track.js 2층 절 참조
+// widthProfile: [{ t, halfWidth }]                                 → 주기 smoothstep 보간
+// shortcuts:    [{ tStart, tEnd, side: -1|+1, extra, blend? }]     → side +1 = 진행방향 오른쪽
+// theme 추가 키(선택): bridgeColor(기본 0x9a9a96), shortcutColor(기본 0x8a7a58)
 // theme: { road /*textures 키*/, roadTint, wall, sky, fog:{color,near,far}, groundColor,
 //          mountainColor, curbA, curbB, boostColor, decor:'trees'|'rocks'|'none',
 //          props: [{ key /*assets.props 키*/, spacing /*m*/, side /*1|-1|0=교대*/, offset /*m*/, scale? }] }
@@ -330,23 +469,42 @@ export const TRACKS = [ /* 5개 맵 (평면 4 + 고저차 1) */ ]
 // 소비자는 track.js 생성자와 main.js fitSunToTrack 둘뿐이다 — 새로 추가하는 소비자는
 // 반드시 같은 판별을 쓸 것(y를 z로 오독해도 에러가 안 나는 조용한 실패다).
 //
-// controlPoints는 오프라인 수치 검증(최소 곡률반경 > halfWidth+4, 비인접 이격 > 2*halfWidth+4)을
-// 통과한 값이다. **임의로 수정하지 말 것** — 특히 night는 곡률 여유가 0.15m뿐이다.
+// controlPoints는 오프라인 수치 검증을 통과한 값이다. **임의로 수정하지 말 것** —
+// 특히 night는 곡률 여유가 0.15m뿐이다.
+//
+// ★ v4 형상 검증 조건 (v3의 "비인접 이격 > 2*halfWidth+4"를 대체한다 — 그 조건 자체가
+//   오버패스를 정의상 금지하는 조건이었다):
+//   호길이 간격이 π·(max hw + 4) 이상인 모든 중심선 점 쌍 (i, j)에 대해,
+//   S = hw_i + hw_j + 4, dXZ = 수평 거리, dY = |y_i - y_j| 라 할 때
+//     ZONE-A (평면 이격):  dXZ >= S + 8                                        → 통과 (dY 무관)
+//     ZONE-B (입체 교차):  dY >= 11.0  AND  i 또는 j 가 선언된 overpass span 안 → 통과 (dXZ 무관)
+//     그 외                                                                    → 실패
+//   +8m 가드밴드가 "간신히 평면 이격만 되는" 애매한 중간 영역을 제거한다.
+//   ZONE-B의 "선언된 span" 조건은 우연한 적층을 금지한다 — 데이터에 적지 않은 곳에서 두 노면이
+//   겹치면 지형·교량이 생성되지 않아 조용히 깨진다.
+//   추가: 모든 overpass에 0.06 < tStart < tEnd < 0.94, 교차 t 중 하나가 <0.1이고 다른 하나가
+//   >0.9인 조합 금지(랩 판정 보호), 교차각 >= 70도, 하단 통과 구간 ±20m에서 |dy/ds| <= 0.02.
+//   곡률 정합은 **샘플별**로 검사한다: R_i > _hwMax[i] + 4 (리본), R_i > _hwMax[i] + 3.2 (지형 평탄대).
+//   폭: 감폭 |d hw/ds| <= 0.10 / 증폭 <= 0.30 / 반폭 >= 5.0m / 출발선 ±30m 반폭 상수.
 // 고저차 맵은 위 XZ 조건에 더해 다음을 만족해야 한다(s = XZ 투영 호길이):
 //   - 최대 기울기 |dy/ds| <= 0.20 (권장 0.18)
 //   - 출발 구간 s ∈ [-25, +30] 에서 |dy/ds| < 0.01
 //     (출발선 타일/게이트/스폰 그리드가 피치 보정 없이 수평으로 놓이기 때문)
 //   - halfWidth + 3.2 < 최소 곡률반경  (지형 평탄대가 코너 안쪽에서 접히지 않게)
-//   - XZ 이격 조건은 고저차가 있어도 그대로 지킬 것 — 지형은 단일 높이장이라
-//     같은 XZ에 두 개의 노면 높이(입체 교차)를 표현할 수 없다.
+//   - (v3까지) "XZ 이격 조건은 고저차가 있어도 그대로 지킬 것 — 지형은 단일 높이장이라 같은 XZ에
+//     두 개의 노면 높이(입체 교차)를 표현할 수 없다"는 **v4에서 폐기**되었다. 아래 ZONE-A/B 규칙을 쓴다.
 //
 // 실측값 (독립 재계산, three 0.170.0):
-//   맵                 halfWidth  3D길이   XZ길이  최소곡률R  최소이격  최대|dy/ds|  고도차
-//   green-circuit          9      411.50  411.50    13.43     36.59      0        0
-//   sunset-speedway       11      465.30  465.30    22.81     44.55      0        0
-//   coastal-grandtour     12      885.31  885.31    20.23     44.10      0        0
-//   night-technical        8      362.70  362.70    12.16     31.78      0        0
-//   alpine-pass           11      746.27  740.21    31.27     44.23    0.1729   35.85m
+//   맵                 난이도 halfWidth  3D길이   XZ길이  최소곡률R  최대|dy/ds|  고도차  오버패스
+//   green-circuit         1       9      411.50  411.50    13.43       0        0       -
+//   sunset-speedway       1      11      465.30  465.30    22.81       0        0       -
+//   night-technical       1       8      362.70  362.70    12.16       0        0       -
+//   harbor-viaduct        2      10      667.31  664.90    18.74     0.1570   22.00m   1개(수직여유 13.0m)
+//   ravine-crossover      3       9      833.01  829.86    18.02     0.1690   29.00m   1개(수직여유 15.0m)
+// 신규 2맵은 반경 변조 폐곡선이 아니라 **구간 시퀀스**(직선 + 클로소이드-원호-클로소이드 코너)를
+// 적분해 만들었다. 두 로브를 각각 총회전 +270도 / -270도로 폐합해 이어 붙이면 총회전 0(=8자)이고
+// 접합점을 두 번 지나며 heading 차가 정확히 90도가 된다 → 교차각 90.0도를 설계로 얻는다.
+// 균일 호길이 6.0m 재샘플(8m는 R20 코너에서 Catmull-Rom이 원호를 설계값의 0.79배까지 깎는다).
 ```
 
 ## src/assets.js
@@ -385,6 +543,18 @@ export async function loadAssets(onProgress, audioContext)
   쿨다운 Map은 `buildTrack()`(맵 재구축)과 `startCountdown()`(같은 맵 재시작) 양쪽에서 clear 해야 한다.
 - 맵 선택: 타이틀에서 P0 raw steer의 ±0.5 엣지로 순환(히스테리시스 0.3), `localStorage 'kart-map'`에
   맵 id 저장. 타이틀 배경 프리뷰는 200ms 디바운스 후 재구축하고, Start 시 디바운스를 취소한다.
+- **(v4) 게임 모드**: `gameMode`는 `'items' | 'speed'`, `localStorage 'kart-mode'`에 저장.
+  - 타이틀에서 **P0 raw brake**(키보드 S / 패드 LT)의 0.5 상승 엣지로 토글(해제 0.2 히스테리시스).
+    brake를 쓰는 이유: `steer`는 맵 선택, `drift`는 패드 A/RB라 `anyStartPressed()`와 동시에
+    눌린다 — 세 축 중 충돌하지 않는 유일한 축이다. `input.js`는 손대지 않는다.
+  - `goToTitle()`에서 현재 brake 값으로 래치를 시딩한다(brake를 누른 채 타이틀에 들어와도 즉시 토글되지 않게).
+  - `setGameMode(m, announce)` → `itemSystem.setEnabled(m === 'items')` + `hud.setGameMode(m)` (+ 'switch' 효과음).
+  - `buildTrack()`이 `new ItemSystem(...)` 직후에 `setEnabled(gameMode === 'items')`를 다시 건다.
+  - 레이스 루프의 아이템 사용 중계는 `gameMode === 'items'` 가드로 감싼다(효과음 중복 방지).
+  - `resetItems()`는 balloons/puddles도 정리한다(웅덩이는 지오/재질까지 dispose).
+  - 스피드전에 남는 것: 드리프트 미니터보, 부스터 패드, 견인, 벽 슬라이드, 경사 물리.
+- **(v4) 난이도 표기**: `hud.setMapInfo`의 3개 호출부(`setMapIndex` / `buildTrack` / `goToTitle`)가
+  모두 `difficulty: def.difficulty ?? 1`을 함께 넘긴다.
 - pause: race 중 pause 입력 → settingsMenu.toggle() + 게임 일시정지(dt 무시).
 - settings.onChange: splitMode → splitView.setMode, volume → audio.setVolume, sensitivity → input에 곱, laps → track.totalLaps 대신 main이 보관하고 kart 생성 시 전달… (laps는 main이 보관, Kart.update 랩 판정은 lap만 올리고 완주 판정은 main이 `kart.lap > laps`로 해도 됨 — 통합 담당 재량, 단 HUD 표기는 일관되게).
 - quality: 'low'면 그림자 끄기 + pixelRatio 1.
@@ -392,6 +562,18 @@ export async function loadAssets(onProgress, audioContext)
   track.js 밖의 유일한 코드**다 — 원소 배열 길이로 [x,z] / [x,y,z]를 판별해 x/z를 뽑고,
   타깃 y와 `cam.far`에 고도 범위를 반영한다. 판별을 빼면 [x,y,z] 맵에서 y를 z로 오독해
   그림자 프러스텀이 어긋나는데 **에러가 나지 않는다**(alpine-pass 실측 z 17.1m 이탈).
+
+## 알려진 잔여 아티팩트 (v4, 수용)
+
+- **합체 카메라가 데크 아래를 지날 때**: `splitMode='auto'`에서 두 카트가 일정 거리 이상 떨어진 채
+  중점이 교량 데크 아래에 있으면, 합체 카메라 높이 `CHASE_UP + 1.2 + spread×0.26`가 상판 밑면을
+  넘어가 최대 0.6초 동안 카트가 상판에 가려질 수 있다.
+  차폐 임계 spread 실측: harbor-viaduct **24.1m**, ravine-crossover **31.8m** (auto 분할 전환은 34m).
+  체이스캠(분할 모드)은 어떤 경사에서도 카메라가 카트보다 최대 6.5m 위라 **영구히 차폐되지 않는다**
+  (실측 여유 harbor 7.45m / ravine 9.45m).
+  `splitMode='split'`에서는 발생하지 않는다. `view.js`는 이번 작업에서 손대지 않았다.
+- 근본 해결(터널 구간에서 카메라를 낮추는 것)은 다음 기회로 미룬다. 여유를 15.6m로 키우는 안은
+  기각했다 — 진입 램프가 왕복 180m를 잡아먹고 5층 건물 높이의 교각이 카트 스케일과 맞지 않는다.
 
 ## index.html
 
@@ -404,5 +586,7 @@ export async function loadAssets(onProgress, audioContext)
 
 ## 게임 상수 정정 (v2)
 
-- 트랙 폭 halfWidth는 맵마다 다르다: green 9 / sunset 11 / night 8 (v1의 "약 9m"는 green 기준).
+- 트랙 폭 halfWidth는 맵마다 다르다: green 9 / sunset 11 / night 8 / harbor-viaduct 10 /
+  ravine-crossover 9 (v1의 "약 9m"는 green 기준). (v4) 신규 2맵은 구간별로 좁아지므로
+  기준폭일 뿐이다 — 실제 반폭은 `sample().halfWidth`(per-side), 전역 최대는 `track.maxHalfWidth`.
 - 랩 수는 설정(1~5)에서 바뀌며 main이 `track.totalLaps`에 써 넣는다. 기본 3.

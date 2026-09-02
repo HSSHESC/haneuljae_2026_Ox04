@@ -7,6 +7,7 @@ const ITEM_ICONS = {
   shell: '🐢',
   banana: '🍌',
   star: '⭐',
+  balloon: '💧',
 };
 
 // 아이템 설명 — 타이틀 가이드와 사용 토스트가 같은 출처를 쓴다.
@@ -20,8 +21,10 @@ const ITEM_INFO = {
               desc: '바로 뒤에 떨어뜨린다. 밟은 카트는 스핀. 쫓기는 상황에서 쓴다.' },
   star:     { name: '스타',   color: '#f2d14b', short: '5초 무적',
               desc: '5초간 무적. 피격되지 않고, 부딪힌 상대를 대신 스핀시킨다.' },
+  balloon:  { name: '물풍선', color: '#3fb6e8', short: '착탄지 미끄럼',
+              desc: '포물선으로 던져 착탄점에 8초짜리 물웅덩이를 만든다. 지나간 카트는 1.6초간 접지력을 잃고 미끄러진다 — 스핀이 아니라 조향이 둔해지는 것이다.' },
 };
-const ITEM_ORDER = ['mushroom', 'shell', 'banana', 'star'];
+const ITEM_ORDER = ['mushroom', 'shell', 'banana', 'star', 'balloon'];
 
 function el(tag, className, parent) {
   const e = document.createElement(tag);
@@ -233,6 +236,40 @@ const STYLE = `
   font-size: 13px;
   opacity: 0.7;
 }
+.hud-title .map-difficulty {
+  margin-top: -10px;
+  font-size: 18px;
+  letter-spacing: 3px;
+  color: #ffce54;
+  text-shadow: 0 2px 6px rgba(0,0,0,0.5);
+}
+.hud-title .mode-select {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 16px;
+  font-weight: 700;
+  margin-top: -6px;
+}
+.hud-title .mode-select .mode-option {
+  opacity: 0.5;
+  padding: 3px 10px;
+  border-radius: 999px;
+  transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+.hud-title .mode-select .mode-option.active {
+  opacity: 1;
+  background: rgba(255,255,255,0.15);
+  color: #4dd0ff;
+}
+.hud-title .mode-select .mode-sep {
+  opacity: 0.4;
+}
+.hud-title .mode-hint {
+  margin-top: -14px;
+  font-size: 12px;
+  opacity: 0.65;
+}
 .hud-title .prompt {
   font-size: 22px;
   font-weight: 700;
@@ -437,8 +474,23 @@ export class HUD {
     this.titleMapName.textContent = '';
     const arrowRight = el('span', 'arrow', mapSelect);
     arrowRight.textContent = '▶';
+    this.mapDifficultyEl = el('div', 'map-difficulty', this.titleEl);
+    this.mapDifficultyEl.textContent = '★☆☆';
     this.mapHintEl = el('div', 'map-hint', this.titleEl);
     this.mapHintEl.textContent = '◀ ▶ 맵 선택';
+
+    // 게임 모드 선택 행: 아이템전 / 스피드전. P0 brake(키보드 S / 패드 LT) 상승 에지로 main.js가 전환한다.
+    const modeRow = el('div', 'mode-select', this.titleEl);
+    this.modeItemsEl = el('span', 'mode-option', modeRow);
+    this.modeItemsEl.textContent = '아이템전';
+    const modeSep = el('span', 'mode-sep', modeRow);
+    modeSep.textContent = '/';
+    this.modeSpeedEl = el('span', 'mode-option', modeRow);
+    this.modeSpeedEl.textContent = '스피드전';
+    this.modeHintEl = el('div', 'mode-hint', this.titleEl);
+    this.modeHintEl.textContent = 'S / LT: 모드 전환';
+    this._gameMode = 'items';
+
     const prompt = el('div', 'prompt', this.titleEl);
     prompt.textContent = 'Start 버튼 또는 Enter로 시작';
     const controls = el('div', 'controls', this.titleEl);
@@ -447,10 +499,11 @@ export class HUD {
       'P1(파랑): 방향키 이동 · 0(메인) 드리프트 · 오른쪽 Shift 아이템<br>' +
       '게임패드: RT 가속 · LT 브레이크 · 좌스틱 조향 · A/RB 드리프트 · X/LB 아이템 · Start 일시정지';
     // 아이템 효과 안내 — 아이템이 무엇을 하는지 보여줄 곳이 없어 조작이 '먹통'처럼 느껴졌다.
-    const guide = el('div', 'item-guide', this.titleEl);
+    // speed 모드에서는 아이템이 없으므로 이 카드 전체를 숨긴다(setGameMode).
+    this.itemGuideEl = el('div', 'item-guide', this.titleEl);
     for (const key of ITEM_ORDER) {
       const info = ITEM_INFO[key];
-      const card = el('div', 'card', guide);
+      const card = el('div', 'card', this.itemGuideEl);
       card.style.borderLeftColor = info.color;
       const icon = el('div', 'icon', card);
       icon.textContent = ITEM_ICONS[key];
@@ -489,6 +542,9 @@ export class HUD {
     this.resultsRestart.innerHTML =
       'Start 또는 Enter로 같은 맵 재시작<br>B 또는 Backspace로 타이틀(맵 선택)';
     this.resultsEl.style.display = 'none';
+
+    // 초기 모드 표시(아이템전) 반영
+    this.setGameMode(this._gameMode);
   }
 
   _buildPlayerPanel() {
@@ -544,11 +600,13 @@ export class HUD {
       panel.lap.textContent = `LAP ${Math.min(p.lap, p.totalLaps)}/${p.totalLaps}`;
       panel.speed.textContent = `${Math.round((p.speed || 0) * 3.6)} km/h`;
       panel.itemSlot.textContent = p.item ? (ITEM_ICONS[p.item] || '❓') : '';
+      // 스피드전에는 아이템이 없다 — 슬롯 자체를 숨긴다.
+      panel.itemSlot.style.display = this._gameMode === 'speed' ? 'none' : '';
 
-      // 아이템 변화 감지: null→X = 획득, X→null = 사용. 레이스 중에만 띄운다.
+      // 아이템 변화 감지: null→X = 획득, X→null = 사용. 레이스 중, 아이템전에서만 띄운다.
       const prev = this._prevItems[i] || null;
       const cur = p.item || null;
-      if (cur !== prev && state === 'race') {
+      if (cur !== prev && state === 'race' && this._gameMode === 'items') {
         if (cur) this._showToast(i, cur, '획득');
         else if (prev) this._showToast(i, prev, '사용');
       }
@@ -655,9 +713,26 @@ export class HUD {
     this.padCountEl.textContent = `연결된 게임패드: ${n}`;
   }
 
-  setMapInfo({ name } = {}) {
+  setMapInfo({ name, difficulty } = {}) {
     this._mapName = name || '';
     this.titleMapName.textContent = this._mapName;
-    this.mapBadgeEl.textContent = this._mapName;
+    const d = Math.max(1, Math.min(3, Math.round(difficulty) || 1));
+    if (this.mapDifficultyEl) this.mapDifficultyEl.textContent = '★'.repeat(d) + '☆'.repeat(3 - d);
+    this._renderMapBadge();
+  }
+
+  // 'items' | 'speed'. 타이틀 모드 강조 표시, 레이스 중 배지 병기, 아이템 가이드 노출을 갱신한다.
+  setGameMode(mode) {
+    this._gameMode = mode === 'speed' ? 'speed' : 'items';
+    const isSpeed = this._gameMode === 'speed';
+    if (this.modeItemsEl) this.modeItemsEl.classList.toggle('active', !isSpeed);
+    if (this.modeSpeedEl) this.modeSpeedEl.classList.toggle('active', isSpeed);
+    if (this.itemGuideEl) this.itemGuideEl.style.display = isSpeed ? 'none' : 'flex';
+    this._renderMapBadge();
+  }
+
+  // 상단 맵 배지: 스피드전이면 '맵명 · 스피드전'으로 병기한다.
+  _renderMapBadge() {
+    this.mapBadgeEl.textContent = this._gameMode === 'speed' ? `${this._mapName} · 스피드전` : this._mapName;
   }
 }
