@@ -19,6 +19,25 @@ const WALL_RUMBLE_DUR = 0.25;  // wallHitImpulse가 0으로 감쇠하는 시간(
 const DRIFT_CHARGE_T = [0.8, 1.6, 2.4];   // 미니터보 단계 차지 시간
 const DRIFT_BOOST_DUR = [0.6, 1.0, 1.4];  // 단계별 부스트 지속
 const KART_RADIUS = 1.2;
+const COLLIDE_LEVEL_DY = 5.0;     // m — 두 카트의 y 차가 이보다 크면 다른 층으로 보고 충돌을 건너뛴다
+                                  // (items.js PUDDLE_LEVEL_DY와 동일 임계값)
+
+// ---- 견인(러버밴딩) 공개 계약 ----
+// CONTRACTS.md의 Kart 공개 API 목록에는 아직 이 기능의 시그니처·수치가 없다. 계약 본문이
+// 이름만 언급하므로(‘부스트/견인 → 경사 배율 → …’), 소비자가 알아야 할 스펙을 여기 명시한다.
+//
+//   setCatchup(factor)  factor: number, 1 = 견인 없음. 1 미만/NaN/undefined는 1로 클램프된다.
+//                       즉시 반영이 아니라 update()에서 CATCHUP_LERP(초당 2.0)로 수렴한다.
+//   kart.catchup        현재 적용 중인 배율(읽기 전용). 초기값 1.
+//
+// 적용 지점 2곳:
+//   · topSpeed  — 비부스트 시 ×catchup, 부스트 시 ×(1 + (catchup-1)×CATCHUP_BOOST_SHARE)
+//   · ACCEL     — throttle 가속에 ×catchup
+// 호출자(main.js updateCatchup)는 선두와의 progress 격차 CATCHUP_NEAR=30m~CATCHUP_FAR=130m를
+// smoothstep으로 보간해 최대 CATCHUP_MAX=1.25를 넘긴다.
+// ★ 그 결과 CONTRACTS.md ‘게임 상수’의 “최고 속도: 일반 주행 약 38 m/s”는 조건부다 —
+//   뒤처진 카트는 부스트 없이 MAX_SPEED×1.25 = 47.5 m/s, 부스트 중에는
+//   BOOST_SPEED×(1+0.25×0.4) = 55×1.1 = 60.5 m/s 까지 낼 수 있다(단 SPEED_ABS_MAX=66로 상한).
 const CATCHUP_LERP = 2.0;         // 견인 배율이 목표로 수렴하는 속도(초당) — 급변 방지
 const CATCHUP_BOOST_SHARE = 0.4;  // 부스트 중에는 견인 효과를 40%만 적용(과속 방지)
 
@@ -44,7 +63,6 @@ const PROC_WHEEL_RADIUS = 0.32;   // 절차 생성 바퀴 반지름
 const MODEL_WHEEL_RADIUS = 0.44;  // GLB 바퀴 0.21m × 스케일 2.1
 
 const _v1 = new THREE.Vector3();
-const _v2 = new THREE.Vector3();
 const _spinQ = new THREE.Quaternion();
 const _AXIS_X = new THREE.Vector3(1, 0, 0);
 
@@ -228,6 +246,7 @@ export class Kart {
   }
 
   // 견인 목표 배율 설정(1 = 없음). 즉시 반영이 아니라 update()에서 CATCHUP_LERP로 수렴한다.
+  // 전체 계약(적용 지점·실효 최고속)은 파일 상단 '견인 공개 계약' 블록 참조.
   setCatchup(factor) {
     const f = Number(factor);
     this._catchupTarget = Number.isFinite(f) ? Math.max(1, f) : 1;
@@ -413,9 +432,16 @@ export class Kart {
       // 이 벡터가 가리키는 쪽이 +lateral(= 진행방향 기준 오른쪽)이다. 구 주석의 "왼쪽 +"는 오답이었다.
       _v1.set(-s2.roadDir.z, 0, s2.roadDir.x).normalize(); // left 벡터
       const clamped = THREE.MathUtils.clamp(s2.lateral, -limit, limit);
-      _v2.copy(s2.roadPoint).addScaledVector(_v1, clamped);
-      this.position.x = _v2.x;
-      this.position.z = _v2.z;
+      // ★ 위치를 '재구성'하지 말고 '횡방향 초과분만' 밀어낸다.
+      //   roadPoint.x/z 는 400개 중심선 샘플 중 최근접점 그대로다. 과거처럼
+      //   position = roadPoint + left*clamped 로 다시 만들면 접선 성분(샘플과 카트 사이의
+      //   진행 방향 잔차 u)이 매 프레임 0으로 리셋되어, 벽을 긁는 동안 한 프레임 전진량이
+      //   0 아니면 샘플 간격(L/400) 둘 중 하나가 된다 → 전진하려면 v·dt > (L/400)/2 이어야
+      //   하는데 harbor-viaduct(1.668m→50.0 m/s)·ravine-crossover(2.083m→62.5 m/s)는
+      //   BOOST_SPEED=55 로도 이 임계를 못 넘어 '벽에 붙으면 영구 정지'가 됐다.
+      //   left·(clamped - lateral)만 더하면 접선 성분 u가 그대로 보존되어 계약대로 슬라이드한다.
+      //   (left.y === 0 이라 y는 손대지 않는다 — 아래에서 s2.roadPoint.y로 덮어쓴다.)
+      this.position.addScaledVector(_v1, clamped - s2.lateral);
 
       // 도로 진행 방향(XZ 정규화)
       const rLen = Math.hypot(s2.roadDir.x, s2.roadDir.z) || 1;
@@ -469,9 +495,10 @@ export class Kart {
     // ---- 랩/진행도 ----
     const t = s2.t;
     if (this._prevT !== null && !this.finished) {
+      let lapJustCompleted = false; // 이번 프레임에 결승선을 '정주행으로' 막 통과했는가
       if (this._prevT > 0.9 && t < 0.1) {
         // 정주행 라인 통과. 스폰이 출발선 뒤(t≈0.99)이므로 최초 1회는 랩을 올리지 않는다.
-        if (this._crossedStartOnce) this.lap += 1;
+        if (this._crossedStartOnce) { this.lap += 1; lapJustCompleted = true; }
         else this._crossedStartOnce = true;
       } else if (this._prevT < 0.1 && t > 0.9) {
         // 역주행 보정. 최초 통과를 되돌린 경우엔 랩 대신 플래그를 되돌린다.
@@ -479,7 +506,12 @@ export class Kart {
         else if (this.lap <= 1) this._crossedStartOnce = false;
         else this.lap -= 1;
       }
-      if (this.lap > track.totalLaps) {
+      // 완주 판정은 반드시 '결승선 통과 이벤트'에만 묶는다. 매 프레임 lap > totalLaps 를
+      // 보면, 레이스 중 설정에서 랩 수를 현재 랩보다 낮추는 순간 결승선과 무관한 트랙
+      // 한복판에서 완주로 확정되고 finishTime에 통과와 무관한 raceTime이 박힌다.
+      // 랩 수가 라이브로 낮아진 경우엔 다음 결승선 통과 시점에 정상적으로 완주 처리된다.
+      // (lap은 크로싱에서만 변하므로 랩 수가 고정된 기존 동작과는 값 수준에서 동일하다.)
+      if (lapJustCompleted && this.lap > track.totalLaps) {
         this.finished = true;
         this.finishTime = raceTime !== undefined ? raceTime : null;
       }
@@ -521,7 +553,16 @@ export class Kart {
   }
 }
 
+// 카트-카트 충돌: 반경 KART_RADIUS(1.2m)의 원기둥 2개가 겹치면 밀어내고 speed를 25% 교환한다.
+// 판정은 XZ 평면에서만 하되, 그 '앞에' 층(레벨) 게이트를 둔다 — 2층 오버패스 맵에서는 같은
+// XZ에 노면이 두 번(상단 데크/하단 도로) 지나가므로 XZ 거리만 보면 수직으로 13~15m 떨어진
+// 서로 다른 층의 두 카트가 서로를 밀고 속도를 교환하며, 상단이 스타면 매 프레임 spin()이
+// 재호출되어 하단 카트 속도가 0으로 무너진다.
 export function collideKarts(a, b) {
+  // 층 게이트: items.js의 PUDDLE_LEVEL_DY와 같은 5m(오버패스 최소 수직여유 11m의 절반).
+  // 단일 레벨 맵에서는 두 카트가 같은 노면에 얹히므로 |Δy| ≤ 노면경사×2.4m ≪ 5 → 완전한 항등.
+  if (Math.abs(a.position.y - b.position.y) > COLLIDE_LEVEL_DY) return;
+
   const dx = b.position.x - a.position.x;
   const dz = b.position.z - a.position.z;
   const distSq = dx * dx + dz * dz;

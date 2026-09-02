@@ -8,6 +8,26 @@ const MERGE_DIST = 26;        // 이하 → 합체
 const SPLIT_DIST = 34;        // 이상 → 분할 (사이 구간은 직전 상태 유지)
 const TRANSITION_TIME = 0.5;  // s
 
+// 오버패스(2층 교차) 층 분리 임계. 두 카트의 고도차가 이 값을 넘으면 서로 다른
+// 노면(상판 / 그 아래 도로) 위에 있다는 뜻이라, 3D 거리가 아무리 가까워도 한 화면에
+// 담을 수 없다 — 합체 카메라는 두 위치의 중점을 보므로 중점 y가 두 층의 중간(harbor
+// 6.50m)이 되고, 카메라 높이 = mid.y + CHASE_UP + 1.2 + spread*0.26 이 spread=0에서도
+// 12.70m로 상판 밑면(12.45m)을 넘어 하단 카트가 상판 슬래브에 완전히 가려진다.
+// (거리만 보던 기존 판정에서는 층간 XZ 거리가 0.3m뿐이라 3D 거리 = 고도차 13~15m
+//  < MERGE_DIST(26) → 반드시 합체로 오판했다. 계약이 적어 둔 차폐 임계 spread
+//  24.1m 는 두 카트가 모두 하단, 즉 mid.y = 0 을 암묵 가정한 값이다.)
+// 임계값 근거 — 5맵 노면 **전 주행폭**(중심선 ±0.95·반폭) 전수 조사, 3D 26m 이내인
+// 두 노면 점의 최대 고도차:
+//   green/sunset/night 0.00m · harbor-viaduct 6.49m · ravine-crossover 6.11m
+//   ↔ 층이 갈린 쌍은 13.00m(harbor) / 15.00m(ravine).
+// ★ 중심선만 재면 4.04/4.29m 가 나오지만 그건 과소평가다 — 스위치백 램프에서 두 카트가
+//   도로 **반대쪽 가장자리**에 붙으면 3D 거리가 줄어들면서 같은 층인데도 6.49m 까지 벌어진다.
+//   6.0 으로 잡으면 그 배치(같은층 배치의 0.0026%)가 거짓 분할된다 → 8.0 으로 올려
+//   같은 층 최대(6.49) 위, 층간 최소(13.00) 아래의 빈 구간 한가운데에 둔다.
+// 평면 맵은 노면 y가 전부 0이라 dy === 0 → 두 분기 모두 무발동(값 수준 항등).
+const LEVEL_SPLIT_DY = 8.0;   // 초과 → 강제 분할 (거리 판정보다 우선)
+const LEVEL_HOLD_DY = 6.5;    // 층에서 내려오는 동안 재합체를 지연시키는 히스테리시스
+
 // GLB 카트 실측 전고 2.79m(assets.js KART_SCALE 2.1 × bbox 1.329m) 기준으로
 // 시야선이 카트 최상단(약 2.79m)보다 위를 지나도록 뒤/위/시선높이를 올렸다.
 // (뒤 8.5, 위 5.0, 시선+2.0 → 카트 위치에서의 시선 높이 ≈ 3.04m, 여유 약 0.25m)
@@ -166,6 +186,16 @@ export class SplitView {
 
     kartPosition(a, _pos);
     kartPosition(b, _tmp);
+
+    // ① 층 분리 판정 — 3D 거리보다 먼저 본다. 오버패스 상판과 그 아래 도로처럼
+    // 고도가 갈린 두 카트는 다리 구조물이 사이를 가로막아 합체 화면에 함께 담기지
+    // 않는다(3D 거리는 26m 미만이라 거리 판정만으로는 항상 '가깝다'가 나온다).
+    // 평면 맵에서는 dy === 0 이라 아래 두 줄 모두 무발동이다.
+    const dy = Math.abs(_pos.y - _tmp.y);
+    if (dy > LEVEL_SPLIT_DY) { this._splitActive = true; return; }
+    if (dy > LEVEL_HOLD_DY && this._splitActive) return;
+
+    // ② 같은 층일 때의 거리 히스테리시스
     const d = _pos.distanceTo(_tmp);
     if (d > SPLIT_DIST) this._splitActive = true;
     else if (d < MERGE_DIST) this._splitActive = false;

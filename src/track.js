@@ -295,16 +295,41 @@ export class Track {
     const left = new THREE.Vector3(-flatDir.z, 0, flatDir.x);
     const toPos = new THREE.Vector3(position.x - roadPoint.x, 0, position.z - roadPoint.z);
     const lateral = toPos.dot(left);
+    // ★ 반폭은 샘플 단위 배열이지만 도로 리본(_ribbonGeometry)은 인접 샘플 사이를 직선으로
+    //   잇는다. 최근접 샘플 값을 그대로 돌려주면 물리 경계가 도색 경계보다 최대
+    //   (감폭률 × 샘플간격/2) 만큼 안쪽에 놓여, 지름길 닫힘 램프처럼 반폭이 빠르게 변하는
+    //   구간에서 "화면상 완전히 포장 위인데 offRoad" 가 되고 샘플 경계마다 뒤집혀 점멸한다.
+    //   → 질의점의 종방향 위치 u 로 이웃 샘플과 선형 보간해 리본과 같은 경계를 돌려준다.
+    //   고정폭 맵에서는 두 샘플 값이 같아 (b - a) === 0 → a + 0 * u === a (IEEE754 항등)이고,
+    //   보간 자체가 켜지지 않은 것과 값이 완전히 동일하다.
+    const proj = toPos.dot(flatDir);   // 최근접 샘플 기준 종방향(수평) 오프셋
+    const nbI = proj >= 0 ? (bestI + 1) % SAMPLES : (bestI - 1 + SAMPLES) % SAMPLES;
+    const pn = this._pts[nbI], dn = this._dirs[nbI];
+    const dLong = (pn.x - roadPoint.x) * flatDir.x + (pn.z - roadPoint.z) * flatDir.z; // 이웃 중심선의 종방향 위치
+    const lnDotD = -dn.z * flatDir.x + dn.x * flatDir.z;                                // l_nb · d_best (≈ sin Δθ)
+    // 가장자리 코드의 종방향 길이는 오프셋만큼 늘거나(코너 바깥) 줄어든다(코너 안쪽) —
+    // 중심선 구간 길이로 나누면 R20 코너 + 오프셋 11m 에서 u 가 0.3 이나 어긋난다.
+    // 그래서 경계마다 그 경계 자신의 종방향 길이로 나눈다(edgeFrac). 상수폭이면 어차피
+    // (b - a) === 0 이라 u 가 무엇이든 결과가 항등이므로 기존 맵의 값을 건드리지 않는다.
+    const hwP = this._hwPos[bestI]
+      + (this._hwPos[nbI] - this._hwPos[bestI]) * edgeFrac(proj, dLong, lnDotD, this._hwPos[nbI]);
+    const hwN = this._hwNeg[bestI]
+      + (this._hwNeg[nbI] - this._hwNeg[bestI]) * edgeFrac(proj, dLong, lnDotD, -this._hwNeg[nbI]);
     // 가변폭: 반폭은 좌우 독립이다. halfWidth 는 "질의 지점의 lateral 부호 쪽" 값을 준다 →
     // kart.js(halfWidth+1.5 벽 클램프)와 items.js(halfWidth+1.5 소멸)가 무수정으로 정확해진다.
     // 고정폭 맵에서는 _hwPos === _hwNeg === this.halfWidth 라 기존과 완전히 같은 값이다.
-    const hwP = this._hwPos[bestI], hwN = this._hwNeg[bestI];
     const halfWidth = lateral >= 0 ? hwP : hwN;
     // 지름길(컷 존): 기준폭(_hwBase) 밖으로 파고든 쪽에서만 최고속 배율이 붙는다.
+    // 기준폭/가산폭도 같은 u 로 보간한다 — 안 하면 노면 배율 경계에서 같은 점멸이 남는다.
     // 컷 존이 없는 맵/샘플에서는 정확히 1 → 소비 측의 x*1 이 IEEE754 항등.
     let surfaceFactor = 1;
-    const scExtra = lateral >= 0 ? this._scPos[bestI] : this._scNeg[bestI];
-    if (scExtra > 0 && Math.abs(lateral) > this._hwBase[bestI]) surfaceFactor = SHORTCUT_SURFACE;
+    const sSide = lateral >= 0 ? 1 : -1;
+    // 컷 존 스트립의 안쪽 모서리는 ±_hwBase 선이다 — 그 선의 종방향 길이로 보간한다.
+    const uB = edgeFrac(proj, dLong, lnDotD, sSide * this._hwBase[nbI]);
+    const scA = lateral >= 0 ? this._scPos : this._scNeg;
+    const scExtra = scA[bestI] + (scA[nbI] - scA[bestI]) * uB;
+    const hwBase = this._hwBase[bestI] + (this._hwBase[nbI] - this._hwBase[bestI]) * uB;
+    if (scExtra > 0 && Math.abs(lateral) > hwBase) surfaceFactor = SHORTCUT_SURFACE;
     return {
       t: bestI / SAMPLES,
       index: bestI, // 다음 프레임 hint 용 (계약 외 보너스 필드)
@@ -489,6 +514,7 @@ export class Track {
     //   → 측정한 첨두를 1.5로 나눠 같은 단위로 비교하고, 경고에는 둘 다 적는다.
     const PEAK = 1.5;
     let minHW = Infinity, baseNarrow = 0, baseWiden = 0, scRate = 0;
+    let sideNarrow = 0, sideNarrowI = -1, sideNarrowSide = 0;
     for (let i = 0; i < SAMPLES; i++) {
       const j = (i + 1) % SAMPLES;
       const ds = (this._cum[i + 1] - this._cum[i]) || 1e-6;
@@ -504,6 +530,15 @@ export class Track {
         const r = Math.abs(arr[j] - arr[i]) / ds;
         if (r > scRate) scRate = r;
       }
+      // ★ 카트가 실제로 부딪히는 값은 합성 반폭(_hwPos/_hwNeg)이다. 기준폭과 가산폭을 따로
+      //   보면 "닫히는 컷 존"이 증폭 상한(0.30)으로만 검사돼 통과해버린다 — kart.js 의 벽
+      //   한계는 s.halfWidth + 1.5 = _hwPos + 1.5 이므로 여분 대역이 사라지는 것도 카트
+      //   입장에서는 완전히 동일한 '다가오는 벽'이다. 좌/우 각각을 감폭 상한으로 검사한다.
+      for (let k = 0; k < 2; k++) {
+        const arr = k === 0 ? this._hwPos : this._hwNeg;
+        const r = -(arr[j] - arr[i]) / ds;
+        if (r > sideNarrow) { sideNarrow = r; sideNarrowI = i; sideNarrowSide = k === 0 ? 1 : -1; }
+      }
     }
     if (minHW < MIN_HALF_WIDTH) {
       warn(`최소 반폭 ${minHW.toFixed(2)}m < ${MIN_HALF_WIDTH}m — 두 카트가 나란히 지날 수 없다`);
@@ -518,6 +553,15 @@ export class Track {
     if (scRate / PEAK > MAX_WIDEN_RATE + 1e-9) {
       warn(`지름길 램프율 ${(scRate / PEAK).toFixed(3)}(첨두 ${scRate.toFixed(3)}) > ${MAX_WIDEN_RATE}`
         + ' — extra 를 줄이거나 shortcuts[].blend 를 늘려라');
+    }
+    if (sideNarrow / PEAK > MAX_NARROW_RATE + 1e-9) {
+      // 38 m/s(일반 최고속) 주행 시 벽 클램프가 프레임당 밀어넣는 횡거리 — MAX_NARROW_RATE 의 근거.
+      const perFrame = sideNarrow * (38 / 60);
+      const sideTxt = sideNarrowSide > 0 ? '+lateral' : '-lateral';
+      warn(`합성 반폭 감폭률 ${(sideNarrow / PEAK).toFixed(3)}(첨두 ${sideNarrow.toFixed(3)},`
+        + ` ${sideTxt} 쪽 샘플 ${sideNarrowI}) > ${MAX_NARROW_RATE}`
+        + ` — 38m/s 에서 벽이 프레임당 ${perFrame.toFixed(3)}m(60fps) 밀고 들어온다.`
+        + ` 닫히는 쪽이 지름길이면 가산폭 E 에 대해 blend >= ${PEAK}·E/${MAX_NARROW_RATE} 가 필요하다`);
     }
     // 곡률 정합은 샘플별로 본다 (가장 넓은 곳과 가장 급한 코너가 같은 자리라는 보장이 없다)
     let worstI = -1, worstMargin = Infinity;
@@ -1569,6 +1613,15 @@ function sqDistXZ(a, b) {
 function sqDistLevel(a, b) {
   const dx = a.x - b.x, dz = a.z - b.z, dy = a.y - b.y;
   return dx * dx + dz * dz + LEVEL_W * dy * dy;
+}
+
+// sample()의 반폭 종방향 보간 계수(0..1). proj = 최근접 샘플 기준 종방향 오프셋,
+// (dLong, lnDotD) = 이웃 샘플의 중심선 종방향 위치와 l_nb·d_best, edgeOff = 그 경계의 횡오프셋
+// (+ = +lateral 쪽). 분모는 "그 경계선"의 종방향 길이 — 중심선 길이로 나누면 코너 안팎에서
+// 최대 ±hw/R 만큼 어긋난다. 분모가 0/부호역전/NaN 이면 0 또는 1로 잘려 항상 유한하다.
+function edgeFrac(proj, dLong, lnDotD, edgeOff) {
+  const r = proj / (dLong + edgeOff * lnDotD);
+  return r > 0 ? (r < 1 ? r : 1) : 0;
 }
 
 function smoothstep01(t) {

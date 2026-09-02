@@ -14,12 +14,21 @@ const BALLOON_UP = 9.0;      // m/s 초기 상승
 const BALLOON_G = 22;        // m/s² 중력
 const BALLOON_LIFE = 3.0;    // s 안전장치
 const BALLOON_HIT_R = 1.4;   // 직격 판정 반경
+const BALLOON_SPAWN_H = 1.0; // 발사 높이(노면 위)
+const BALLOON_BURST_H = 0.25;// 파열 높이(노면 위)
+// 평지 기준 체공시간. (BALLOON_G/2)t² - BALLOON_UP·t - (SPAWN_H - BURST_H) = 0 의 양의 근 = 0.8944s.
+// 발사 시 경사 보정(_spawnBalloon)과 그 근거인 "평지 도달거리 = 수평속도 × 이 값"의 기준.
+const BALLOON_AIRTIME = (BALLOON_UP + Math.sqrt(
+  BALLOON_UP * BALLOON_UP + 2 * BALLOON_G * (BALLOON_SPAWN_H - BALLOON_BURST_H))) / BALLOON_G;
 const PUDDLE_R = 4.0;        // 웅덩이 반경(m)
 const PUDDLE_LIFE = 8.0;     // s
 const PUDDLE_TRIG_R = 4.6;   // PUDDLE_R + 0.6
 const PUDDLE_LEVEL_DY = 5.0; // 웅덩이 판정의 레벨 분리 높이차(2층 맵에서 위/아래층 오판 방지)
+const WALL_MARGIN = 1.5;     // 코스 이탈 판정 여유 — kart.js의 벽 클램프(halfWidth + 1.5)와 같은 값
 const SLIP_DUR = 1.6;        // kart.applySlip 지속(초)
 const ITEM_TYPES = ['mushroom', 'shell', 'banana', 'star', 'balloon'];
+
+const _tmpVec = new THREE.Vector3(); // _spawnBalloon 전방 탐침용 (프레임당 할당 방지)
 
 export class ItemSystem {
   constructor(scene, track) {
@@ -252,7 +261,7 @@ export class ItemSystem {
         const smp = this.track.sample(s.mesh.position, s._sampleHint);
         s._sampleHint = smp.index;
         s.mesh.position.y = smp.roadPoint.y + SHELL_HEIGHT;
-        if (Math.abs(smp.lateral) > smp.halfWidth + 1.5) dead = true;
+        if (Math.abs(smp.lateral) > smp.halfWidth + WALL_MARGIN) dead = true;
       }
 
       // 카트 충돌
@@ -300,13 +309,29 @@ export class ItemSystem {
     const dir = new THREE.Vector3(-Math.sin(kart.heading), 0, -Math.cos(kart.heading));
     const mesh = new THREE.Mesh(this._balloonGeo, this._balloonMat);
     mesh.position.copy(kart.position).addScaledVector(dir, 1.6);
-    mesh.position.y += 1.0;
+    mesh.position.y += BALLOON_SPAWN_H;
     this.scene.add(mesh);
     const vel = dir.clone().multiplyScalar(BALLOON_SPEED + Math.max(0, kart.speed) * 0.5);
-    vel.y = BALLOON_UP;
     // 스폰 첫 프레임은 힌트가 없어 전역 탐색을 하는데, y를 포함한 비용으로 1회 미리 탐색해
     // 이후 프레임의 국소창(±25 샘플)이 처음부터 올바른 레벨에서 시작하게 한다(오버패스 대응).
     const seed = this.track.sample(mesh.position);
+    // 경사 보정. 파열 조건이 "노면 위 BALLOON_BURST_H"인데 roadPoint.y가 비행 중에 함께
+    // 오르내리므로, 보정이 없으면 체공시간이 경사에 직접 종속된다 — 실측 도달거리가
+    // 8.3~56.1m(6.8배)로 흔들려 "20m 앞 카트를 넘겨 착탄"이라는 튜닝 전제가 깨진다.
+    // 보정: 평지라면 날아갔을 거리(reach) 앞의 노면 높이를 미리 재고, 그 고저차를 체공시간
+    // 동안 따라잡을 만큼의 수직속도를 초기값에 더한다. 그러면 **노면을 기준으로 한** 포물선이
+    // 평지와 같아져 체공 0.894s / 정점 노면+2.84m / 도달거리 = 수평속도 × 0.894 가 유지된다.
+    //   탐침 y에 mesh.position.y(발사 높이)를 넣는 것이 중요하다 — 2층 맵에서 sample()의
+    //   레벨 판별 비용이 y를 쓰므로, 발사 레벨과 같은 층의 노면을 재게 된다.
+    //   힌트(seed.index)를 넘겨 국소 탐색으로 끝내므로 발사당 추가 비용은 sample() 1회다.
+    // ★ 평면 맵(green/sunset/night)은 _roadY가 항상 0이라 고저차가 정확히 0 →
+    //   vel.y = BALLOON_UP + 0 으로 기존 값과 비트 단위 동일하다. 이 형태를 반드시 유지할 것.
+    const reach = Math.hypot(vel.x, vel.z) * BALLOON_AIRTIME;
+    const ahead = this.track.sample(
+      _tmpVec.set(mesh.position.x + dir.x * reach, mesh.position.y, mesh.position.z + dir.z * reach),
+      seed.index
+    );
+    vel.y = BALLOON_UP + (ahead.roadPoint.y - seed.roadPoint.y) / BALLOON_AIRTIME;
     this.balloons.push({ mesh, vel, owner: kart, life: BALLOON_LIFE, _sampleHint: seed.index });
   }
 
@@ -326,9 +351,13 @@ export class ItemSystem {
 
       if (b.life <= 0) {
         dead = true;
-      } else if (b.mesh.position.y <= smp.roadPoint.y + 0.25) {
+      } else if (b.mesh.position.y <= smp.roadPoint.y + BALLOON_BURST_H) {
         dead = true;
-        landed = true;
+        // 셸(_updateShells)과 같은 코스 이탈 판정. 벽(halfWidth + 1.5) 바깥에 떨어진 물풍선은
+        // 어느 카트도 닿을 수 없는 곳에 8초짜리 웅덩이를 남기므로 조용히 소멸시킨다.
+        // 같은 판정이 '공중에 뜬 웅덩이'도 막는다 — track._roadY()는 노면 단면을 횡방향으로
+        // 무한 외삽하므로 평탄대 밖 착탄점에서는 실제 지형보다 위에 웅덩이가 걸린다.
+        landed = Math.abs(smp.lateral) <= smp.halfWidth + WALL_MARGIN;
       } else {
         for (const kart of karts) {
           if (kart === b.owner && b.life > BALLOON_LIFE - 0.3) continue; // 발사 직후 주인 무시

@@ -316,9 +316,17 @@ function snapshotKarts() {
     spin: k.spinTimer,
     finished: k.finished,
     // kart.js에 아직 없을 수 있는 필드 — 있으면만 추적(존재 가드)
+    slip: typeof k.slipTimer === 'number' ? k.slipTimer : 0,
     wallHitImpulse: typeof k.wallHitImpulse === 'number' ? k.wallHitImpulse : 0,
   }));
 }
+
+// 출발 그리드 좌우 배정.
+// track.getSpawnTransforms 는 col 0 을 +lateral(= 진행방향 기준 화면 오른쪽)에 놓는다.
+// 그런데 P0(빨강)은 WASD, P1(파랑)은 방향키 — 키보드에서 WASD가 왼쪽이고 분할화면도
+// P0가 왼쪽 반쪽이다. 그리드만 반대라 혼란스러우므로 배정을 뒤집어 P0를 왼쪽에 세운다.
+// (track.js 의 그리드 정의는 건드리지 않는다 — 맵 지오메트리 계약이라 그대로 두는 게 맞다.)
+const GRID_SLOT = [1, 0];   // 플레이어 i → spawns 인덱스
 
 function buildKarts() {
   disposeKarts();
@@ -327,7 +335,7 @@ function buildKarts() {
     const model = assets && assets.karts ? assets.karts[KART_MODEL_KEYS[i]] : null;
     const kart = new Kart({
       color: KART_COLORS[i],
-      spawn: spawns[i],
+      spawn: spawns[GRID_SLOT[i]],
       name: KART_NAMES[i],
       model: model || undefined,   // 없으면 Kart가 절차 생성 메시로 폴백
     });
@@ -345,7 +353,7 @@ function respawnKartsAtSpawns() {
   if (!track || karts.length === 0) return;
   const spawns = track.getSpawnTransforms(karts.length);
   for (let i = 0; i < karts.length; i++) {
-    const sp = spawns[i];
+    const sp = spawns[GRID_SLOT[i] ?? i];   // 타이틀 프리뷰 재배치도 같은 규칙
     const k = karts[i];
     if (!sp || !k) continue;
     k.object3d.position.copy(sp.position);
@@ -362,10 +370,14 @@ function respawnKartsAtSpawns() {
 
 function resetItems() {
   if (!itemSystem) return;
+  // 스피드전(setEnabled(false))에서는 박스를 계속 숨긴 채로 되돌린다.
+  // 무조건 visible=true로 되돌리면 ItemSystem.update()가 !enabled로 즉시 빠지는 탓에
+  // 회전도 부유도 하지 않는 큐브 12개가 노면 위에 얼어붙는다(CONTRACTS.md setEnabled 계약 위반).
+  const boxesVisible = itemSystem.enabled !== false;
   for (const box of itemSystem.boxes) {
     box.active = true;
     box.respawnTimer = 0;
-    box.mesh.visible = true;
+    box.mesh.visible = boxesVisible;
     box.mesh.scale.setScalar(1);
   }
   for (const s of itemSystem.shells) scene.remove(s.mesh);
@@ -539,6 +551,13 @@ function playEventSounds() {
     if (k.spinTimer > 0 && p.spin <= 0) {
       audio.play('hit');
       inputManager.rumble(i, 0.75, 0.5, 250);
+    }
+    // 물풍선 직격/웅덩이 통과(applySlip) — 스핀과 달리 조작은 살아 있지만 조향 권한이 55% 줄어든다.
+    // 아무 피드백이 없으면 "조작이 먹통"으로 읽히므로, 스핀('hit' + 0.75/0.5/250ms)과 구분되도록
+    // 같은 효과음에 약하고 긴 럼블(0.35/0.6/400ms)을 건다.
+    if (typeof k.slipTimer === 'number' && k.slipTimer > 0 && !(p.slip > 0)) {
+      audio.play('hit');
+      inputManager.rumble(i, 0.35, 0.6, 400);
     }
     if (k.lap > p.lap && k.lap <= laps) audio.play('lap');
     if (k.finished && !p.finished) audio.play('finish');
