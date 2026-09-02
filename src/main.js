@@ -99,7 +99,11 @@ let finishForceTimer = null; // 첫 완주자 발생 후 카운트다운(초); n
 let prev = [];               // 효과음 edge 검출용 직전 프레임 스냅샷
 
 let mapIndex = 0;
-let mapSteerLatch = 0;       // 0 | -1 | 1 — 맵 선택 스틱 엣지 래치
+let mapSteerLatch = 0;       // 0 | -1 | 1 — 맵 선택 스틱 엣지 래치(구 경로, 미사용 유지)
+const TITLE_ITEMS = 2;       // 맵 / 모드
+const RESULT_ITEMS = 2;      // 재시작 / 타이틀로
+let titleFocus = 0;          // 0 = 맵, 1 = 모드 — W/S로 이동
+let resultFocus = 0;         // 0 = 재시작, 1 = 타이틀로
 
 let gameMode = 'items';      // 'items' | 'speed' — boot()에서 loadGameMode()로 즉시 덮어씀
 let modeBrakeLatch = false;  // 타이틀 모드 전환 브레이크(P0) 엣지 래치
@@ -284,7 +288,7 @@ function buildTrack(def) {
   track.totalLaps = laps;
   applyTheme(def.theme || {});
   fitSunToTrack(def);
-  itemSystem = new ItemSystem(scene, track);
+  itemSystem = new ItemSystem(scene, track, assets && assets.items);
   if (typeof itemSystem.setEnabled === 'function') itemSystem.setEnabled(gameMode === 'items');
   boostPadCooldowns.clear(); // 맵 재구축 시 부스트 패드 쿨다운 초기화(패드 배치가 트랙마다 다르므로)
   if (hud) hud.setMapInfo({ name: def.name, difficulty: def.difficulty ?? 1 });
@@ -469,6 +473,8 @@ function goToTitle() {
   modeBrakeLatch = (inputManager ? (inputManager.getPlayerInput(0).brake || 0) : 0) > 0.5;
   raceTime = 0;
   state = 'title';
+  titleFocus = 0;
+  if (hud && typeof hud.setTitleFocus === 'function') hud.setTitleFocus(0);
   if (typeof audio.setRaceActive === 'function') audio.setRaceActive(false);
 }
 
@@ -617,7 +623,7 @@ function frame(now) {
   if (!isFinite(dt) || dt < 0) dt = 0;
   dt = Math.min(dt, 0.05); // 탭 복귀 등 큰 점프 방지
 
-  inputManager.poll();
+  inputManager.poll(dt);   // 메뉴 입력 리피트 타이밍에 dt가 필요하다
 
   const inA = playerInput(0);
   const inB = playerInput(1);
@@ -641,12 +647,28 @@ function frame(now) {
 
   if (!paused) {
     switch (state) {
-      case 'title':
-        // 맵 선택은 시작 판정보다 먼저 — 이번 프레임의 선택이 그대로 확정되도록.
-        updateMapSelect(rawA.steer);
-        updateModeSelect(rawA.brake);
+      case 'title': {
+        // WASD(=메뉴 입력)만으로 조작한다. W/S = 항목 이동, A/D = 값 변경, Start/Enter = 시작.
+        // 주행 입력(steer/brake)을 메뉴에 겸용하던 구 경로는 쓰지 않는다 — 축이 겹쳐 혼동됐다.
+        const menu = typeof inputManager.getMenuInput === 'function' ? inputManager.getMenuInput() : null;
+        if (menu) {
+          if (menu.up || menu.down) {
+            titleFocus = (titleFocus + (menu.down ? 1 : -1) + TITLE_ITEMS) % TITLE_ITEMS;
+            audio.play('menu');
+          }
+          const dir = menu.right ? 1 : menu.left ? -1 : 0;
+          if (dir !== 0) {
+            if (titleFocus === 0) setMapIndex(mapIndex + dir, true);
+            else setGameMode(gameMode === 'items' ? 'speed' : 'items', true);
+          }
+        } else {
+          updateMapSelect(rawA.steer);   // getMenuInput 미지원 빌드용 폴백
+          updateModeSelect(rawA.brake);
+        }
+        if (typeof hud.setTitleFocus === 'function') hud.setTitleFocus(titleFocus);
         if (startEdge) { audio.play('menu'); startSelectedMap(); }
         break;
+      }
 
       case 'countdown': {
         countdownTimer -= dt;
@@ -700,9 +722,19 @@ function frame(now) {
         for (const k of karts) k.update(dt, EMPTY_INPUT, track, raceTime);
         collideKarts(karts[0], karts[1]);
         itemSystem.update(dt, karts);
-        // Start = 같은 맵으로 재시작(트랙 유지), B/Backspace = 타이틀로 돌아가 맵 재선택.
-        if (startEdge) { audio.play('menu'); startCountdown(); }
-        else if (backEdge) { audio.play('menu'); goToTitle(); }
+        // W/S로 항목을 고르고 Start/Enter로 결정. Backspace/B는 항상 타이틀로 가는 지름길.
+        {
+          const menu = typeof inputManager.getMenuInput === 'function' ? inputManager.getMenuInput() : null;
+          if (menu && (menu.up || menu.down)) {
+            resultFocus = (resultFocus + (menu.down ? 1 : -1) + RESULT_ITEMS) % RESULT_ITEMS;
+            audio.play('menu');
+          }
+          if (typeof hud.setResultsFocus === 'function') hud.setResultsFocus(resultFocus);
+        }
+        if (startEdge) {
+          audio.play('menu');
+          if (resultFocus === 0) startCountdown(); else goToTitle();
+        } else if (backEdge) { audio.play('menu'); goToTitle(); }
         break;
       }
     }

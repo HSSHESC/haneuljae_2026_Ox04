@@ -19,6 +19,13 @@ const PROP_TARGET_LIGHT_HEIGHT = 4.4; // m — 계획의 4~5m 범위
 const PROP_SCALE_FALLBACK = 7;        // 가로등 측정 실패 시 계획상 기준 계수
 const PROP_SCALE_RANGE = [3, 15];     // 측정값이 이상할 때의 안전 클램프
 
+// 아이템 모델 실측(로컬 유닛):
+//  item-box  = platformer-kit crate-item.glb — 0.5x0.5x0.5, min.y=0 (피벗이 바닥면)
+//              → ×2.8 = 1.40m 정육면체, inner.position.y = -0.25 로 중심 정렬
+//  water-orb = marble-kit marble-low.glb — 0.38x0.40x0.38, 노드 T(0,-0.2,0)로 이미 중심 정렬
+//              → ×1.75 = 지름 0.70m (기존 SphereGeometry(0.35)와 동일). 유리 머티리얼 alpha 0.5
+const ITEM_EXPECT_TOL = 0.25; // 실측 크기가 기대치에서 이만큼(비율) 벗어나면 경고만 남긴다
+
 const TEXTURE_ANISOTROPY = 4;
 
 const FONT_FAMILY = 'Kenney Future';
@@ -32,15 +39,49 @@ const KART_FILES = {
   blue: 'karts/kart-blue.glb', // kart-oobi
 };
 
+// 프롭 팩. 킷마다 모델링 단위가 달라서 스케일 규칙을 팩 단위로 가른다.
+//  city   — city-kit-roads. 1유닛 타일 킷. 가로등 실측(0.6유닛=4.4m) → 계수 ≈7.33.
+//           기존 5맵의 프롭 배치가 이 계수와 '원본 피벗'에 맞춰져 있으므로 재중심화 금지.
+//  space  — kenney_space-kit. 같은 1유닛 타일 킷이라 city와 동일 계수를 쓴다.
+//           ★ 낱개 GLB가 전부 tmpParent(T=0) > <오브젝트>(T=[2,0,1.5]) 구조라
+//             그대로 붙이면 (2,0,1.5)×scale ≈ (14.7,0,11.0)m 밀린다 → recenter 필수.
+//  castle — kenney_retro-fantasy-kit. 실측 미터 단위(벽 1모듈=1.0m) 킷이라 auto 계수를
+//           적용하면 안 된다. 아케이드 스케일에 맞춘 8m 모듈로 고정한다.
+const PROP_PACKS = {
+  city: { dir: 'props/', scale: 'auto', recenter: false },
+  space: { dir: 'props-space/', scale: 'auto', recenter: true },
+  castle: { dir: 'props-castle/', scale: 8.0, recenter: false },
+};
+
 const PROP_FILES = {
-  lightSquare: 'props/light-square.glb',
-  lightCurved: 'props/light-curved.glb',
-  signWarning: 'props/road-sign-warning.glb',
-  signStop: 'props/road-sign-stop.glb',
-  signHighway: 'props/sign-highway.glb',
-  trafficLight: 'props/traffic-light.glb',
-  cone: 'props/construction-cone.glb',
-  barrier: 'props/construction-barrier.glb',
+  lightSquare: { pack: 'city', file: 'light-square.glb' },
+  lightCurved: { pack: 'city', file: 'light-curved.glb' },
+  signWarning: { pack: 'city', file: 'road-sign-warning.glb' },
+  signStop: { pack: 'city', file: 'road-sign-stop.glb' },
+  signHighway: { pack: 'city', file: 'sign-highway.glb' },
+  trafficLight: { pack: 'city', file: 'traffic-light.glb' },
+  cone: { pack: 'city', file: 'construction-cone.glb' },
+  barrier: { pack: 'city', file: 'construction-barrier.glb' },
+  // 우주선 맵(orbital-station)
+  spaceGate: { pack: 'space', file: 'gate.glb' },
+  spacePylon: { pack: 'space', file: 'pylon.glb' },
+  spaceDish: { pack: 'space', file: 'dish.glb' },
+  spaceBlock: { pack: 'space', file: 'block.glb' },
+  spaceTank: { pack: 'space', file: 'tank.glb' },
+  // 중세 성 맵(castle-rampart)
+  castleWall: { pack: 'castle', file: 'wall.glb' },
+  castleGate: { pack: 'castle', file: 'wall-gate.glb' },
+  castleTower: { pack: 'castle', file: 'tower-base.glb' },
+  castleBarrel: { pack: 'castle', file: 'barrels.glb' },
+};
+
+// 아이템 모델. tint가 있으면 prepareKart와 같은 방식으로 머티리얼을 clone 후 색만 바꾼다
+// (원본 템플릿 오염 금지). transparent/opacity/side 등 GLB가 준 값은 건드리지 않는다 —
+// marble-low의 alpha 0.5가 물풍선의 유리질을 만든다.
+const ITEM_FILES = {
+  // scale/recenterY는 위 실측에서 나온 고정값. expect는 전처리 후 실측으로 되짚는 자기검증용.
+  box: { file: 'items/item-box.glb', scale: 2.8, recenterY: -0.25, tint: null, expect: 1.4 },
+  orb: { file: 'items/water-orb.glb', scale: 1.75, recenterY: 0, tint: 0x3fb6e8, expect: 0.7 },
 };
 
 const TEXTURE_FILES = {
@@ -75,6 +116,7 @@ const THRUSTER_FILE = 'audio/engine/thruster.ogg';
 const TOTAL_TASKS =
   Object.keys(KART_FILES).length +
   Object.keys(PROP_FILES).length +
+  Object.keys(ITEM_FILES).length +
   Object.keys(TEXTURE_FILES).length +
   Object.keys(SFX_FILES).length +
   ENGINE_FILES.length + 1 /* thruster */ + 1 /* font */;
@@ -172,7 +214,7 @@ function measureHeight(object3d) {
   return box.max.y - box.min.y;
 }
 
-// 가로등(light-square) 실측 높이로 일괄 계수를 산출. 실패 시 계획상 ×7.
+// 가로등(light-square) 실측 높이로 'auto' 팩의 일괄 계수를 산출. 실패 시 계획상 ×7.
 function resolvePropScale(rawScenes) {
   const ref = rawScenes.lightSquare;
   if (!ref) return PROP_SCALE_FALLBACK;
@@ -186,8 +228,27 @@ function resolvePropScale(rawScenes) {
   return factor;
 }
 
+// space 팩 전용: 원본 씬을 XZ 중심 + 바닥(y=0) 기준으로 되돌린다.
+// kenney_space-kit 낱개 GLB는 카탈로그 씬 좌표 T=[2,0,1.5]가 노드에 남아 있어
+// 이 보정 없이는 프롭이 배치 지점에서 (2,0,1.5)×scale 만큼 밀려 박힌다.
+// city 팩에 같은 처리를 하면 light-square(min=(-0.025,0,-0.213))가 실제로 움직여
+// 기존 5맵의 프롭 배치가 전부 어긋나므로 반드시 팩 플래그로 가른다.
+function recenterToFootprint(inner, key) {
+  const box = new THREE.Box3().setFromObject(inner);
+  if (box.isEmpty()) {
+    console.warn(`[assets] prop ${key}: 빈 bbox — 재중심화 생략`);
+    return;
+  }
+  const cx = (box.min.x + box.max.x) / 2;
+  const cz = (box.min.z + box.max.z) / 2;
+  inner.position.x -= cx;
+  inner.position.z -= cz;
+  inner.position.y -= box.min.y;
+}
+
 // KHR_texture_transform을 쓰는 킷이라 머티리얼은 절대 교체하지 않는다(GLTFLoader가 처리).
-function prepareProp(scene, key, factor) {
+function prepareProp(scene, key, factor, pack) {
+  if (pack && pack.recenter) recenterToFootprint(scene, key);
   const wrapper = new THREE.Group();
   wrapper.name = `prop-${key}`;
   wrapper.scale.setScalar(factor);
@@ -197,6 +258,62 @@ function prepareProp(scene, key, factor) {
     obj.castShadow = true;
     obj.receiveShadow = true;
   });
+  return wrapper;
+}
+
+// ---- 아이템 전처리 ----------------------------------------------------
+
+// gltf.scene → wrapper(scale) > inner(recenterY 적용). 그룹 원점이 아이템의 중심이다.
+// items.js는 이 wrapper를 clone()해 쓰고 userData.sharedAsset을 찍는다 →
+// dispose()에서 공유 GLB 사본의 geometry/material을 절대 dispose하지 않는다.
+function prepareItem(scene, spec, key) {
+  const inner = scene;
+  inner.name = inner.name || `item-${key}-root`;
+  inner.position.y += spec.recenterY;
+
+  const wrapper = new THREE.Group();
+  wrapper.name = `item-${key}`;
+  wrapper.scale.setScalar(spec.scale);
+  wrapper.add(inner);
+
+  if (spec.tint != null) {
+    const clonedBySource = new Map();
+    const tintOne = (mat) => {
+      if (!mat) return mat;
+      let cloned = clonedBySource.get(mat);
+      if (!cloned) {
+        cloned = mat.clone();
+        cloned.name = `${mat.name || 'item'}-${key}`;
+        if (cloned.color) cloned.color.setHex(spec.tint);
+        clonedBySource.set(mat, cloned);
+      }
+      return cloned;
+    };
+    wrapper.traverse((obj) => {
+      if (!obj.isMesh) return;
+      obj.material = Array.isArray(obj.material) ? obj.material.map(tintOne) : tintOne(obj.material);
+    });
+  }
+
+  wrapper.traverse((obj) => {
+    if (!obj.isMesh) return;
+    obj.castShadow = true;
+    obj.receiveShadow = true;
+  });
+
+  // 자기검증: 전처리 후 실제 크기가 설계 기대치에서 크게 벗어나면 알린다(조용한 실패 방지).
+  const box = new THREE.Box3().setFromObject(wrapper);
+  if (!box.isEmpty() && spec.expect) {
+    const size = box.max.clone().sub(box.min);
+    const worst = Math.max(size.x, size.y, size.z);
+    if (Math.abs(worst - spec.expect) > spec.expect * ITEM_EXPECT_TOL) {
+      console.warn(`[assets] item ${key}: 전처리 후 최대변 ${worst.toFixed(3)}m — 기대 ${spec.expect}m 와 다릅니다.`);
+    }
+    const cy = (box.min.y + box.max.y) / 2;
+    if (Math.abs(cy) > 0.05) {
+      console.warn(`[assets] item ${key}: y 중심이 ${cy.toFixed(3)}m — 원점 정렬이 어긋났습니다.`);
+    }
+  }
   return wrapper;
 }
 
@@ -287,12 +404,22 @@ export async function loadAssets(onProgress, audioContext) {
     })
   );
 
-  // 프롭 (리스케일 계수는 전부 로드된 뒤 가로등 실측으로 결정)
+  // 프롭 ('auto' 팩의 리스케일 계수는 전부 로드된 뒤 가로등 실측으로 결정)
   const propKeys = Object.keys(PROP_FILES);
   const propTasks = propKeys.map((key) =>
     progress.track(`prop ${key}`, async () => {
-      const gltf = await gltfLoader.loadAsync(BASE + PROP_FILES[key]);
+      const entry = PROP_FILES[key];
+      const pack = PROP_PACKS[entry.pack];
+      const gltf = await gltfLoader.loadAsync(BASE + pack.dir + entry.file);
       return [key, gltf.scene];
+    })
+  );
+
+  // 아이템 모델 (로드 즉시 전처리 — 스케일/중심 정렬은 파일별 실측 고정값)
+  const itemTasks = Object.entries(ITEM_FILES).map(([key, spec]) =>
+    progress.track(`item ${key}`, async () => {
+      const gltf = await gltfLoader.loadAsync(BASE + spec.file);
+      return [key, prepareItem(gltf.scene, spec, key)];
     })
   );
 
@@ -324,9 +451,10 @@ export async function loadAssets(onProgress, audioContext) {
 
   const fontTask = progress.track('font', () => installFont());
 
-  const [kartPairs, rawPropPairs, texPairs, sfxPairs, engineBuffers, thruster] = await Promise.all([
+  const [kartPairs, rawPropPairs, itemPairs, texPairs, sfxPairs, engineBuffers, thruster] = await Promise.all([
     Promise.all(kartTasks),
     Promise.all(propTasks),
+    Promise.all(itemTasks),
     Promise.all(textureTasks),
     Promise.all(sfxTasks),
     Promise.all(engineTasks),
@@ -341,11 +469,18 @@ export async function loadAssets(onProgress, audioContext) {
   for (const key of propKeys) rawProps[key] = null;
   for (const pair of rawPropPairs) if (pair) rawProps[pair[0]] = pair[1];
 
-  const propScale = resolvePropScale(rawProps);
+  const autoScale = resolvePropScale(rawProps);
   const props = {};
   for (const key of propKeys) {
-    props[key] = rawProps[key] ? prepareProp(rawProps[key], key, propScale) : null;
+    if (!rawProps[key]) { props[key] = null; continue; }
+    const pack = PROP_PACKS[PROP_FILES[key].pack];
+    const factor = pack.scale === 'auto' ? autoScale : pack.scale;
+    props[key] = prepareProp(rawProps[key], key, factor, pack);
   }
+
+  const items = {};
+  for (const key of Object.keys(ITEM_FILES)) items[key] = null;
+  for (const pair of itemPairs) if (pair) items[pair[0]] = pair[1];
 
   const textures = {};
   for (const key of Object.keys(TEXTURE_FILES)) textures[key] = null;
@@ -355,9 +490,16 @@ export async function loadAssets(onProgress, audioContext) {
   for (const key of Object.keys(SFX_FILES)) sfx[key] = null;
   for (const pair of sfxPairs) if (pair) sfx[pair[0]] = pair[1];
 
+  // 반환 구조 (모든 슬롯은 개별적으로 null 일 수 있다):
+  //   karts   { red, blue }                          Group(scale 2.1) > inner(rot.y=π)
+  //   props   { lightSquare … castleBarrel } 17종     Group(scale=팩 계수) > inner
+  //   items   { box, orb }                            Group(scale) > inner(중심 정렬)
+  //   textures{ roadDark … wallOrange } 8종
+  //   sfx     { count … switch } 11종 / engine [2] / thruster
   return {
     karts,
     props,
+    items,
     textures,
     sfx,
     engine: [engineBuffers[0] || null, engineBuffers[1] || null],

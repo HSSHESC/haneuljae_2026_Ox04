@@ -1,4 +1,4 @@
-// src/kart.js — 아케이드 카트: 물리 + 드리프트 미니터보 + 랩/진행도 + 저폴리 메시
+// src/kart.js — 아케이드 카트: 물리 + 코너 탈출 부스트 + 랩/진행도 + 저폴리 메시
 import * as THREE from 'three';
 
 // ---- 튜닝 상수 ----
@@ -9,15 +9,24 @@ const BRAKE_DECEL = 42;
 const COAST_DECEL = 7;         // 스로틀 놓았을 때 자연 감속
 const REVERSE_MAX = -10;
 const STEER_RATE = 2.6;        // rad/s 기본 조향 속도
-const DRIFT_STEER_BONUS = 1.15;
 const OFFROAD_FACTOR = 0.4;    // 잔디에서 최고속 40%
 const WALL_MARGIN = 1.5;       // halfWidth + 1.5 넘으면 벽
 const WALL_ALIGN_RATE = 3.0;   // rad/s 접촉 중 heading을 벽 접선으로 정렬하는 최대 각속도
 const WALL_SCRAPE_KEEP = 0.88; // 스치는 동안 초당 잔존 속도 비율(≈ -12%/s)
 const WALL_IMPACT_MAX = 0.15;  // 접촉 순간 1회 충격 감속 상한(법선 성분 비례)
 const WALL_RUMBLE_DUR = 0.25;  // wallHitImpulse가 0으로 감쇠하는 시간(초)
-const DRIFT_CHARGE_T = [0.8, 1.6, 2.4];   // 미니터보 단계 차지 시간
-const DRIFT_BOOST_DUR = [0.6, 1.0, 1.4];  // 단계별 부스트 지속
+
+// ---- 코너 탈출 부스트(코너 차지) ----
+// 드리프트 미니터보를 대체한다. 전용 버튼이 없고, ‘깨끗하게 꾸준히 꺾고 있는 시간’을
+// 누적해 코너를 빠져나오는 순간 자동으로 보상한다. 차지 단위는 시간이 아니라
+// ‘steer·초’ — 매 프레임 dt × min(1,|steer|) 을 더하므로, 살짝 꺾는 긴 완만한 코너보다
+// 깊게 꺾는 타이트한 코너가 빨리 차오른다.
+// 차지는 세 곳에서 보상 없이 무효화된다: spin() / 벽 접촉 / 잔디(offRoad) 이탈.
+const CORNER_STEER_ON   = 0.35;                 // 차지 시작 |steerIn| 임계
+const CORNER_STEER_OFF  = 0.20;                 // 차지 유지 히스테리시스(미세 흔들림에 끊기지 않게)
+const CORNER_MIN_SPEED  = 18;                   // m/s 미만에서는 차지하지 않는다
+const CORNER_CHARGE_T   = [0.40, 0.75, 1.20];   // 티어 1/2/3 임계(단위: steer·초)
+const CORNER_BOOST_DUR  = [0.35, 0.60, 0.90];   // 티어별 부스트 지속(초), power = 1
 const KART_RADIUS = 1.2;
 const COLLIDE_LEVEL_DY = 5.0;     // m — 두 카트의 y 차가 이보다 크면 다른 층으로 보고 충돌을 건너뛴다
                                   // (items.js PUDDLE_LEVEL_DY와 동일 임계값)
@@ -183,7 +192,7 @@ export class Kart {
     this._wheelRadius = model ? MODEL_WHEEL_RADIUS : PROC_WHEEL_RADIUS;
     this._wheelSpin = 0;
 
-    // 틸트(드리프트 기울임)용 내부 그룹으로 재구성.
+    // 틸트(조향 기울임)용 내부 그룹으로 재구성.
     // 모델 경로에서는 clone 루트(스케일·전방 보정 포함)를 통째로 틸트 그룹에 넣는다.
     this._tiltGroup = new THREE.Group();
     if (model) {
@@ -208,7 +217,9 @@ export class Kart {
     this.heading = Math.atan2(-_v1.x, -_v1.z);
 
     this.speed = 0;
-    this.driftLevel = 0;
+    // 코너 차지(읽기 전용 공개 필드). driftLevel을 대체한다.
+    this.cornerCharge = 0;   // 0|1|2|3 — 현재 차지 티어
+    this.chargeRatio = 0;    // 0..1  — _cornerAccum / CORNER_CHARGE_T[2] (HUD 게이지용 연속값)
     this.boostTimer = 0;
     this.spinTimer = 0;
     this.starTimer = 0;
@@ -233,10 +244,9 @@ export class Kart {
     this.finishTime = null;
 
     // 내부 상태
-    this._driftActive = false;
-    this._driftDir = 0;        // -1 | 1
-    this._driftCharge = 0;
-    this._slip = 0;            // 횡 슬립 각(시각/미끄러짐)
+    this._cornerDir = 0;       // -1 | 1 | 0(비차지) — 차지 중인 조향 부호
+    this._cornerAccum = 0;     // 누적 steer·초
+    this._slip = 0;            // 횡 슬립 각(시각/미끄러짐) — 이제 물풍선 슬립 전용
     this._boostPower = 1;
     this._prevT = null;
     this._crossedStartOnce = false;  // 스폰(출발선 뒤) → 첫 출발선 통과는 랩 증가 없음
@@ -262,7 +272,7 @@ export class Kart {
     this.spinTimer = 1;
     this._spinAngle = 0;
     this.speed *= 0.3;
-    this._endDrift(false);
+    this._releaseCorner(false);
   }
 
   setStar(duration) {
@@ -275,14 +285,16 @@ export class Kart {
     this.slipTimer = Math.max(this.slipTimer, duration);
   }
 
-  _endDrift(release) {
-    if (release && this.driftLevel > 0) {
-      this.applyBoost(1, DRIFT_BOOST_DUR[this.driftLevel - 1]);
+  // 코너 차지 해제. reward=true(깨끗한 코너 탈출)일 때만 티어별 부스트를 준다.
+  // reward=false는 무효화 경로(스핀/벽/잔디).
+  _releaseCorner(reward) {
+    if (reward && this.cornerCharge > 0) {
+      this.applyBoost(1, CORNER_BOOST_DUR[this.cornerCharge - 1]);
     }
-    this._driftActive = false;
-    this._driftDir = 0;
-    this._driftCharge = 0;
-    this.driftLevel = 0;
+    this._cornerDir = 0;
+    this._cornerAccum = 0;
+    this.cornerCharge = 0;
+    this.chargeRatio = 0;
   }
 
   update(dt, input, track, raceTime) {
@@ -299,24 +311,24 @@ export class Kart {
     const throttle = controllable ? input.throttle : 0;
     const brake = controllable ? input.brake : 0;
     const steerIn = controllable ? input.steer : 0;
-    const driftBtn = controllable ? input.drift : false;
 
-    // ---- 드리프트 상태기계 ----
-    if (this._driftActive) {
-      if (!driftBtn || this.speed < 6) {
-        this._endDrift(driftBtn ? false : true);
-      } else {
-        this._driftCharge += dt;
-        this.driftLevel =
-          this._driftCharge >= DRIFT_CHARGE_T[2] ? 3 :
-          this._driftCharge >= DRIFT_CHARGE_T[1] ? 2 :
-          this._driftCharge >= DRIFT_CHARGE_T[0] ? 1 : 0;
-      }
-    } else if (driftBtn && Math.abs(steerIn) > 0.25 && this.speed > 12) {
-      this._driftActive = true;
-      this._driftDir = Math.sign(steerIn);
-      this._driftCharge = 0;
-      this.driftLevel = 0;
+    // ---- 코너 차지 상태기계(드리프트 대체) ----
+    // 입력 버튼이 없다. 한 방향으로 임계 이상 꺾고 있는 동안 차오르고, 그 조건이
+    // 깨지는 순간(= 코너 탈출)에 보상한다. 조향 부호가 바뀌어도 한 번 탈출로 친다
+    // (S자 구간에서 각 코너가 개별로 보상된다).
+    const turning = Math.abs(steerIn) > (this._cornerDir ? CORNER_STEER_OFF : CORNER_STEER_ON)
+      && this.speed > CORNER_MIN_SPEED
+      && (this._cornerDir === 0 || Math.sign(steerIn) === this._cornerDir);
+    if (turning) {
+      if (this._cornerDir === 0) this._cornerDir = Math.sign(steerIn);
+      this._cornerAccum += dt * Math.min(1, Math.abs(steerIn));
+      this.cornerCharge =
+        this._cornerAccum >= CORNER_CHARGE_T[2] ? 3 :
+        this._cornerAccum >= CORNER_CHARGE_T[1] ? 2 :
+        this._cornerAccum >= CORNER_CHARGE_T[0] ? 1 : 0;
+      this.chargeRatio = Math.min(1, this._cornerAccum / CORNER_CHARGE_T[2]);
+    } else if (this._cornerDir !== 0) {
+      this._releaseCorner(true);   // 코너 탈출 → 보상
     }
 
     // ---- 종방향: 부드러운 가속 커브 (최고속 근접 시 가속 감소) ----
@@ -348,7 +360,10 @@ export class Kart {
     // offRoad 40% 캡 '앞'에 곱한다(계약: offRoad 캡이 마지막에 남아야 한다).
     topSpeed *= (s.surfaceFactor !== undefined ? s.surfaceFactor : 1);
 
-    if (s.offRoad) topSpeed *= OFFROAD_FACTOR; // 계약: offRoad면 부스트 중이라도 최고속 40% 제한
+    if (s.offRoad) {
+      topSpeed *= OFFROAD_FACTOR; // 계약: offRoad면 부스트 중이라도 최고속 40% 제한
+      this._releaseCorner(false); // 잔디로 나가면 차지를 날린다(깨끗한 라인만 보상)
+    }
 
     if (boosting) {
       // 부스트: 강제 가속
@@ -384,12 +399,7 @@ export class Kart {
     // ---- 조향: 속도 비례 (저속에서 약하고, 고속에서 포화) ----
     const speedFactor = THREE.MathUtils.clamp(Math.abs(this.speed) / 14, 0, 1) *
                         (1 - 0.35 * THREE.MathUtils.clamp((Math.abs(this.speed) - 25) / 30, 0, 1));
-    let steer = steerIn;
-    if (this._driftActive) {
-      // 드리프트: 드리프트 방향으로 기본 회전 + 스틱으로 조절
-      steer = this._driftDir * (0.55 + 0.45 * THREE.MathUtils.clamp(steerIn * this._driftDir, -0.6, 1));
-      steer *= DRIFT_STEER_BONUS;
-    }
+    const steer = steerIn;
     // steer > 0 = 오른쪽 입력. Three.js에서 heading(rotation.y) 증가는 (위에서 볼 때)
     // 반시계 = 왼쪽 회전이므로, 오른쪽으로 돌려면 heading을 감소시켜야 한다.
     // 슬립 중에는 조향 권한이 줄어든다(steerAuth<1) — 조작은 살아있지만 둔해진다. slipTimer=0이면 steerAuth=1로
@@ -398,12 +408,10 @@ export class Kart {
     const yawRate = -steer * steerAuth * STEER_RATE * speedFactor * Math.sign(this.speed || 1);
     this.heading += yawRate * dt;
 
-    // 슬립(드리프트 시 바깥으로 미끄러짐, 또는 물풍선/웅덩이로 인한 접지력 상실): 진행 방향이
-    // 차체 방향보다 덜 꺾인다. 오른쪽 드리프트(_driftDir=+1)는 heading이 감소하므로 진행각은
-    // heading보다 커야 한다. 물풍선 슬립 중에는 요레이트 크기를 슬립각으로 변환해 차체가 게걸음친다.
-    const targetSlip = this._driftActive
-      ? this._driftDir * 0.35
-      : (slipping ? THREE.MathUtils.clamp(-yawRate * SLIP_SLIDE, -0.5, 0.5) : 0);
+    // 슬립(물풍선/웅덩이로 인한 접지력 상실): 진행 방향이 차체 방향보다 덜 꺾인다.
+    // 요레이트 크기를 슬립각으로 변환해 차체가 게걸음친다. 드리프트가 사라졌으므로
+    // slipTimer = 0 이면 targetSlip은 항상 0 — 사이드슬립은 오직 물풍선으로만 발생한다.
+    const targetSlip = slipping ? THREE.MathUtils.clamp(-yawRate * SLIP_SLIDE, -0.5, 0.5) : 0;
     const slipLerp = slipping ? SLIP_LERP : 6;
     this._slip += (targetSlip - this._slip) * Math.min(1, slipLerp * dt);
 
@@ -485,7 +493,7 @@ export class Kart {
       } else {
         this.wallContact = false; // 벽에서 떨어져 나가는 중 — 속도에 손대지 않는다
       }
-      this._endDrift(false);
+      this._releaseCorner(false);  // 벽을 긁으면 차지 무효
     } else {
       this.wallContact = false;
     }
@@ -526,11 +534,11 @@ export class Kart {
     this._pitch += (targetPitch - this._pitch) * Math.min(1, PITCH_LERP * dt);
     // order = 'YXZ' → yaw 먼저, 그 다음 로컬 X 피치. 평면 맵에서는 _pitch=0 → 기존과 동일.
     // 롤(뱅킹)은 넣지 않는다 — 도로 리본은 단면이 수평인 능선면이라 물리적 뱅크가 없고,
-    // _tiltGroup.rotation.z는 드리프트 전용으로 남긴다.
+    // _tiltGroup.rotation.z는 조향 기울임 전용으로 남긴다.
     this.object3d.rotation.set(this._pitch, this.heading + this._spinAngle, 0);
-    // 드리프트/조향 기울임
+    // 조향 기울임
     // rotation.z > 0 은 오른쪽이 들리는 = 왼쪽으로 기우는 롤. 회전 방향으로 기울이므로 부호 반전.
-    const targetTilt = this._driftActive ? -this._driftDir * 0.18 : -steer * 0.06;
+    const targetTilt = -steer * 0.06;
     this._tiltGroup.rotation.z += (targetTilt - this._tiltGroup.rotation.z) * Math.min(1, 8 * dt);
     this._tiltGroup.rotation.y = this._slip * 0.8;
     // 바퀴 굴림 + 앞바퀴 조향
@@ -543,7 +551,7 @@ export class Kart {
       else this._wheels[i].rotation.x += roll;
     }
     // 앞바퀴 조향: rotation.y 증가 = 왼쪽을 가리킴이므로 입력 부호를 반전.
-    const visSteer = this._driftActive ? -this._driftDir * 0.5 : -steerIn * 0.45;
+    const visSteer = -steerIn * 0.45;
     for (const p of this._frontPivots) {
       p.rotation.y += (visSteer - p.rotation.y) * Math.min(1, 10 * dt);
     }

@@ -1,30 +1,62 @@
 // src/hud.js
 // DOM 오버레이 HUD: 랩/순위/아이템/속도/타임, 카운트다운, 타이틀, 결과 패널.
 // 계약(CONTRACTS.md)에 명시된 export만 제공. 다른 모듈은 import하지 않음.
+//
+// v5 변경점
+//  - 드리프트 게이지 제거. kart.cornerCharge(0..3) / kart.chargeRatio(0..1) 기반 '코너 차지' 게이지로 교체.
+//  - 아이템 아이콘: 이모지 → 인라인 SVG(itemIconSVG). 폰트 의존/로드 실패 경로가 없다.
+//  - 메뉴 포커스 박스: setTitleFocus / setResultsFocus (WASD 4키 조작에 대응하는 시각 표시).
 
-const ITEM_ICONS = {
-  mushroom: '🍄',
-  shell: '🐢',
-  banana: '🍌',
-  star: '⭐',
-  balloon: '💧',
-};
+// 아이템 아이콘 — 24×24 viewBox 인라인 SVG. fill="currentColor"라 부모의 color가 그대로 주 색이 된다.
+// 이모지를 쓰지 않는 이유: 폰트마다 모양이 달라지고, 크기/정렬을 CSS로 제어할 수 없다.
+function itemIconSVG(key, size = 24) {
+  const s = Math.round(size);
+  const open = `<svg viewBox="0 0 24 24" width="${s}" height="${s}" fill="currentColor" aria-hidden="true" focusable="false">`;
+  let body;
+  switch (key) {
+    case 'mushroom':
+      body = '<path d="M2,13 A10,9 0 0 1 22,13 Z"/>' +
+             '<rect x="9" y="13" width="6" height="8" rx="2" fill="#f2e8d5"/>';
+      break;
+    case 'shell':
+      body = '<path d="M3,15 A9,8 0 0 1 21,15 Z"/>' +
+             '<rect x="3" y="15" width="18" height="4" rx="2" fill="#e8d9a0"/>' +
+             '<g stroke="rgba(0,0,0,.25)" stroke-width="1" fill="none">' +
+             '<path d="M12,7 L12,15"/><path d="M6.2,11.2 L12,12.4"/><path d="M17.8,11.2 L12,12.4"/></g>';
+      break;
+    case 'banana':
+      body = '<path d="M4,18 C6,8 14,3 20,5 C16,6 9,11 8,19 Z"/>' +
+             '<rect x="19" y="3.5" width="2.4" height="2.4" rx="1" fill="#6b4a1e"/>';
+      break;
+    case 'star':
+      body = '<polygon points="12,2 15,9 22,9.5 16.5,14 18.5,21 12,17.2 5.5,21 7.5,14 2,9.5 9,9"/>';
+      break;
+    case 'balloon':
+      body = '<path d="M12,3 C16,9 19,12 19,15.5 A7,7 0 0 1 5,15.5 C5,12 8,9 12,3 Z"/>' +
+             '<ellipse cx="9.5" cy="14" rx="1.6" ry="2.4" fill="rgba(255,255,255,.55)"/>';
+      break;
+    default:
+      // 미지의 키: '?' 대신 빈 사각 테두리. 레이아웃이 흔들리지 않는다.
+      body = '<rect x="3" y="3" width="18" height="18" rx="4" fill="none" stroke="currentColor" stroke-width="2" opacity="0.6"/>';
+      break;
+  }
+  return open + body + '</svg>';
+}
 
 // 아이템 설명 — 타이틀 가이드와 사용 토스트가 같은 출처를 쓴다.
-// 수치는 items.js/kart.js의 실제 상수와 맞춰 둘 것(버섯 1.2초, 스타 5초, 등껍질 25m/s).
+// desc는 확정 문구(그대로 유지). short는 수치 요약 pill.
+// 주의: 스타의 "부딪힌 쪽이 튕겨 나간다"는 코드상 상대 kart.spin()(1초 스핀)이다. 문구는 확정본이라 그대로 둔다.
 const ITEM_INFO = {
-  mushroom: { name: '버섯',   color: '#e8593a', short: '1.2초 가속',
-              desc: '즉시 부스트. 코너를 빠져나온 직후에 쓰면 최고속까지 단숨에 붙는다.' },
-  shell:    { name: '등껍질', color: '#3fa85a', short: '전방 발사',
-              desc: '앞으로 곧게 날아가 맞은 카트를 1초 스핀시킨다. 벽에 닿으면 사라진다.' },
-  banana:   { name: '바나나', color: '#e8b23a', short: '뒤에 설치',
-              desc: '바로 뒤에 떨어뜨린다. 밟은 카트는 스핀. 쫓기는 상황에서 쓴다.' },
-  star:     { name: '스타',   color: '#f2d14b', short: '5초 무적',
-              desc: '5초간 무적. 피격되지 않고, 부딪힌 상대를 대신 스핀시킨다.' },
-  balloon:  { name: '물풍선', color: '#3fb6e8', short: '착탄지 미끄럼',
-              desc: '포물선으로 던져 착탄점에 8초짜리 물웅덩이를 만든다. 지나간 카트는 1.6초간 접지력을 잃고 미끄러진다 — 스핀이 아니라 조향이 둔해지는 것이다.' },
+  mushroom: { name: '버섯',   color: '#e8593a', short: '1.2초',      desc: '짧고 강한 가속' },
+  shell:    { name: '등껍질', color: '#3fa85a', short: '전방 발사',  desc: '정면으로 날아가 상대를 돌려세운다' },
+  banana:   { name: '바나나', color: '#e8b23a', short: '설치',      desc: '뒤에 놓아 추격자를 노린다' },
+  star:     { name: '스타',   color: '#f2d14b', short: '5초',       desc: '잠시 무적. 부딪힌 쪽이 튕겨 나간다' },
+  balloon:  { name: '물풍선', color: '#3fb6e8', short: '8초 웅덩이', desc: '바닥을 적신다. 밟으면 접지를 잃는다' },
 };
 const ITEM_ORDER = ['mushroom', 'shell', 'banana', 'star', 'balloon'];
+
+// 코너 차지 티어별 게이지 색(1/2/3).
+const CHARGE_COLORS = ['#ffe066', '#ff8c00', '#ff2d55'];
 
 function el(tag, className, parent) {
   const e = document.createElement(tag);
@@ -111,20 +143,21 @@ const STYLE = `
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 20px;
 }
-.hud-corner .drift-bar {
+.hud-corner .item-slot svg { display: block; }
+.hud-corner .charge-bar {
   width: 100%;
   height: 5px;
   border-radius: 3px;
   background: rgba(255,255,255,0.15);
   overflow: hidden;
 }
-.hud-corner .drift-fill {
+.hud-corner .charge-fill {
   height: 100%;
   width: 0%;
-  background: linear-gradient(90deg,#ffe066,#ff8c00,#ff2d55);
-  transition: width 0.1s linear;
+  background: rgba(255,255,255,0.35);
+  border-radius: 3px;
+  transition: width 0.1s linear, background 0.12s ease;
 }
 .hud-timer {
   position: absolute;
@@ -191,6 +224,29 @@ const STYLE = `
   box-shadow: 0 0 8px rgba(0,0,0,0.6);
   transform: translateX(-50%);
 }
+
+/* ── 메뉴 포커스 박스 ──
+   border가 아니라 outline을 쓴다: 박스 크기에 영향이 없어 포커스가 옮겨 다녀도 형제가 밀리지 않는다. */
+.hud-focus {
+  position: relative;
+  outline: 2px solid var(--focus-color, #4dd0ff);
+  outline-offset: 6px;
+  border-radius: 10px;
+  animation: hud-focus-breathe 1.6s ease-in-out infinite;
+}
+@keyframes hud-focus-breathe {
+  0%,100% { box-shadow: 0 0 0 6px rgba(77,208,255,0.12), 0 0 18px rgba(77,208,255,0.35); }
+  50%     { box-shadow: 0 0 0 6px rgba(77,208,255,0.20), 0 0 26px rgba(77,208,255,0.55); }
+}
+/* 이동 순간 팝 1회 + 숨쉬기 유지(두 애니메이션을 같이 건다 — 하나만 쓰면 상시 애니메이션이 죽는다) */
+.hud-focus.hud-focus-pop {
+  animation: hud-focus-pop 0.14s ease-out, hud-focus-breathe 1.6s ease-in-out infinite;
+}
+@keyframes hud-focus-pop {
+  from { transform: scale(0.97); }
+  to   { transform: scale(1); }
+}
+
 .hud-title {
   position: absolute;
   inset: 0;
@@ -354,11 +410,31 @@ const STYLE = `
   display: block;
   object-fit: contain;
 }
-.hud-results .restart {
-  margin-top: 20px;
-  font-size: 15px;
-  font-weight: 700;
-  opacity: 0.85;
+.hud-results .result-actions {
+  margin-top: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  align-items: stretch;
+}
+.hud-results .result-action {
+  font-size: 16px;
+  font-weight: 800;
+  padding: 8px 18px;
+  border-radius: 10px;
+  background: rgba(255,255,255,0.07);
+  border: 1px solid rgba(255,255,255,0.14);
+  opacity: 0.72;
+  transition: opacity 0.15s ease, background 0.15s ease;
+}
+.hud-results .result-action.hud-focus {
+  opacity: 1;
+  background: rgba(255,255,255,0.14);
+}
+.hud-results .result-hint {
+  margin-top: 14px;
+  font-size: 12px;
+  opacity: 0.6;
 }
 
 /* ── 타이틀: 아이템 효과 안내 ── */
@@ -384,8 +460,9 @@ const STYLE = `
   text-align: left;
 }
 .hud-title .item-guide .icon {
-  font-size: 26px;
-  line-height: 1.15;
+  width: 26px;
+  height: 26px;
+  display: block;
   flex-shrink: 0;
 }
 .hud-title .item-guide .body { display: flex; flex-direction: column; gap: 2px; }
@@ -430,7 +507,7 @@ const STYLE = `
   pointer-events: none;
 }
 .hud-toast.show { opacity: 1; transform: translateY(0) scale(1); }
-.hud-toast .t-icon { font-size: 21px; }
+.hud-toast .t-icon { width: 21px; height: 21px; display: block; flex-shrink: 0; }
 .hud-toast .t-sub { font-size: 12.5px; font-weight: 700; opacity: 0.78; }
 `;
 
@@ -439,6 +516,10 @@ export class HUD {
     this.root = el('div', 'hud-root');
     document.head.appendChild(Object.assign(document.createElement('style'), { textContent: STYLE }));
     document.body.appendChild(this.root);
+
+    // 메뉴 포커스 항목 수(main이 % 연산에 쓴다). 읽기 전용.
+    this.TITLE_ITEMS = 2;   // 0 = 맵, 1 = 모드
+    this.RESULT_ITEMS = 2;  // 0 = 재시작, 1 = 타이틀로
 
     // Player corner panels (index 0/1)
     this.playerPanels = [this._buildPlayerPanel(), this._buildPlayerPanel()];
@@ -467,7 +548,10 @@ export class HUD {
     this.titleEl = el('div', 'hud-title', this.root);
     const h1 = el('h1', null, this.titleEl);
     h1.textContent = '한어울제 카트';
+
+    // 포커스 항목 0 — 맵 선택. A/D로 값 변경.
     const mapSelect = el('div', 'map-select', this.titleEl);
+    this.mapSelectEl = mapSelect;
     const arrowLeft = el('span', 'arrow', mapSelect);
     arrowLeft.textContent = '◀';
     this.titleMapName = el('span', 'map-name', mapSelect);
@@ -477,10 +561,11 @@ export class HUD {
     this.mapDifficultyEl = el('div', 'map-difficulty', this.titleEl);
     this.mapDifficultyEl.textContent = '★☆☆';
     this.mapHintEl = el('div', 'map-hint', this.titleEl);
-    this.mapHintEl.textContent = '◀ ▶ 맵 선택';
+    this.mapHintEl.textContent = 'A / D 로 변경';
 
-    // 게임 모드 선택 행: 아이템전 / 스피드전. P0 brake(키보드 S / 패드 LT) 상승 에지로 main.js가 전환한다.
+    // 포커스 항목 1 — 게임 모드(아이템전 / 스피드전). A/D 어느 쪽이든 토글.
     const modeRow = el('div', 'mode-select', this.titleEl);
+    this.modeSelectEl = modeRow;
     this.modeItemsEl = el('span', 'mode-option', modeRow);
     this.modeItemsEl.textContent = '아이템전';
     const modeSep = el('span', 'mode-sep', modeRow);
@@ -488,16 +573,18 @@ export class HUD {
     this.modeSpeedEl = el('span', 'mode-option', modeRow);
     this.modeSpeedEl.textContent = '스피드전';
     this.modeHintEl = el('div', 'mode-hint', this.titleEl);
-    this.modeHintEl.textContent = 'S / LT: 모드 전환';
+    this.modeHintEl.textContent = 'A / D 로 변경';
     this._gameMode = 'items';
 
+    // '시작'은 포커스 항목이 아니다 — Enter는 포커스와 무관하게 항상 시작 하나를 뜻한다.
     const prompt = el('div', 'prompt', this.titleEl);
     prompt.textContent = 'Start 버튼 또는 Enter로 시작';
     const controls = el('div', 'controls', this.titleEl);
     controls.innerHTML =
-      'P0(빨강): WASD 이동 · Space 드리프트 · 왼쪽 Shift 아이템<br>' +
-      'P1(파랑): 방향키 이동 · 0(메인) 드리프트 · 오른쪽 Shift 아이템<br>' +
-      '게임패드: RT 가속 · LT 브레이크 · 좌스틱 조향 · A/RB 드리프트 · X/LB 아이템 · Start 일시정지';
+      'P1(빨강): WASD 주행 · 왼쪽 Shift 아이템<br>' +
+      'P2(파랑): 방향키 주행 · 오른쪽 Shift 아이템<br>' +
+      '게임패드: RT 가속 · LT 브레이크 · 좌스틱 조향 · X/LB 아이템 · Start 일시정지<br>' +
+      '메뉴: W/S 항목 · A/D 값 · Enter(A) 결정 · Backspace(B) 취소';
     // 아이템 효과 안내 — 아이템이 무엇을 하는지 보여줄 곳이 없어 조작이 '먹통'처럼 느껴졌다.
     // speed 모드에서는 아이템이 없으므로 이 카드 전체를 숨긴다(setGameMode).
     this.itemGuideEl = el('div', 'item-guide', this.titleEl);
@@ -506,7 +593,8 @@ export class HUD {
       const card = el('div', 'card', this.itemGuideEl);
       card.style.borderLeftColor = info.color;
       const icon = el('div', 'icon', card);
-      icon.textContent = ITEM_ICONS[key];
+      icon.style.color = info.color;
+      icon.innerHTML = itemIconSVG(key, 26);
       const body = el('div', 'body', card);
       const head = el('div', 'head', body);
       const nm = el('span', null, head);
@@ -521,6 +609,10 @@ export class HUD {
     this.padCountEl = el('div', 'pad-count', this.titleEl);
     this.padCountEl.textContent = '연결된 게임패드: 0';
     this.titleEl.style.display = 'none';
+
+    // 타이틀 포커스 대상(순서 = index)
+    this._titleFocusEls = [this.mapSelectEl, this.modeSelectEl];
+    this._titleFocus = 0;
 
     // 획득/사용 토스트: 플레이어별 1개. main을 거치지 않고 players[].item 변화로 직접 감지한다.
     this.toasts = [0, 1].map(() => {
@@ -538,13 +630,25 @@ export class HUD {
     this.resultsTitle = el('h2', null, panel);
     this.resultsTitle.textContent = 'RESULTS';
     this.resultsList = el('div', 'results-list', panel);
-    this.resultsRestart = el('div', 'restart', panel);
-    this.resultsRestart.innerHTML =
-      'Start 또는 Enter로 같은 맵 재시작<br>B 또는 Backspace로 타이틀(맵 선택)';
+    // 결과 화면 포커스 항목 2개(W/S 이동, Enter 결정).
+    this.resultsActionsEl = el('div', 'result-actions', panel);
+    this.resultsRestartEl = el('div', 'result-action', this.resultsActionsEl);
+    this.resultsRestartEl.textContent = '같은 맵 재시작';
+    this.resultsTitleBtnEl = el('div', 'result-action', this.resultsActionsEl);
+    this.resultsTitleBtnEl.textContent = '타이틀로 (맵 선택)';
+    this.resultsHintEl = el('div', 'result-hint', panel);
+    this.resultsHintEl.textContent = 'W / S 이동 · Enter(A) 결정 · Backspace(B) 타이틀로';
+    // 이전 이름 호환(외부에서 참조하지는 않지만 구조를 잃지 않게 남긴다)
+    this.resultsRestart = this.resultsActionsEl;
     this.resultsEl.style.display = 'none';
 
-    // 초기 모드 표시(아이템전) 반영
+    this._resultFocusEls = [this.resultsRestartEl, this.resultsTitleBtnEl];
+    this._resultFocus = 0;
+
+    // 초기 모드 표시(아이템전) + 초기 포커스 반영
     this.setGameMode(this._gameMode);
+    this.setTitleFocus(0);
+    this.setResultsFocus(0);
   }
 
   _buildPlayerPanel() {
@@ -557,9 +661,41 @@ export class HUD {
     const statRow = el('div', 'stat-row', panelEl);
     const speed = el('div', 'speed', statRow);
     const itemSlot = el('div', 'item-slot', statRow);
-    const driftBar = el('div', 'drift-bar', panelEl);
-    const driftFill = el('div', 'drift-fill', driftBar);
-    return { el: panelEl, dot, nameSpan, rank, lap, speed, itemSlot, driftFill };
+    const chargeBar = el('div', 'charge-bar', panelEl);
+    const chargeFill = el('div', 'charge-fill', chargeBar);
+    return { el: panelEl, dot, nameSpan, rank, lap, speed, itemSlot, chargeFill, itemKey: undefined };
+  }
+
+  // 포커스 박스를 목록 중 하나에 옮겨 붙인다. 이동 순간 팝 애니메이션을 재시작한다.
+  _applyFocus(list, index, color) {
+    if (!Array.isArray(list) || list.length === 0) return 0;
+    const i = ((Math.round(index) || 0) % list.length + list.length) % list.length;
+    list.forEach((node, n) => {
+      if (!node) return;
+      if (n === i) {
+        node.style.setProperty('--focus-color', color);
+        node.classList.remove('hud-focus-pop');
+        node.classList.add('hud-focus');
+        // 리플로우로 애니메이션 재시작(연속 이동에서도 매번 팝이 보이게)
+        void node.offsetWidth;
+        node.classList.add('hud-focus-pop');
+      } else {
+        node.classList.remove('hud-focus', 'hud-focus-pop');
+      }
+    });
+    return i;
+  }
+
+  // i: 0 = 맵, 1 = 모드
+  setTitleFocus(i) {
+    this._titleFocus = this._applyFocus(this._titleFocusEls, i, '#4dd0ff');
+    return this._titleFocus;
+  }
+
+  // i: 0 = 재시작, 1 = 타이틀로
+  setResultsFocus(i) {
+    this._resultFocus = this._applyFocus(this._resultFocusEls, i, '#ffce54');
+    return this._resultFocus;
   }
 
   update({ players = [], state = 'menu', countdown = null, raceTime = 0, splitLayout = 'single' } = {}) {
@@ -599,20 +735,35 @@ export class HUD {
       panel.rank.textContent = p.rank === 1 ? '1st' : p.rank === 2 ? '2nd' : `${p.rank}th`;
       panel.lap.textContent = `LAP ${Math.min(p.lap, p.totalLaps)}/${p.totalLaps}`;
       panel.speed.textContent = `${Math.round((p.speed || 0) * 3.6)} km/h`;
-      panel.itemSlot.textContent = p.item ? (ITEM_ICONS[p.item] || '❓') : '';
+      // 아이콘 SVG는 키가 바뀔 때만 다시 그린다(매 프레임 innerHTML 재파싱 방지).
+      const itemKey = p.item || null;
+      if (panel.itemKey !== itemKey) {
+        panel.itemKey = itemKey;
+        if (itemKey) {
+          const info = ITEM_INFO[itemKey];
+          panel.itemSlot.style.color = info ? info.color : '#fff';
+          panel.itemSlot.innerHTML = itemIconSVG(itemKey, 22);
+        } else {
+          panel.itemSlot.innerHTML = '';
+        }
+      }
       // 스피드전에는 아이템이 없다 — 슬롯 자체를 숨긴다.
       panel.itemSlot.style.display = this._gameMode === 'speed' ? 'none' : '';
 
       // 아이템 변화 감지: null→X = 획득, X→null = 사용. 레이스 중, 아이템전에서만 띄운다.
       const prev = this._prevItems[i] || null;
-      const cur = p.item || null;
+      const cur = itemKey;
       if (cur !== prev && state === 'race' && this._gameMode === 'items') {
         if (cur) this._showToast(i, cur, '획득');
         else if (prev) this._showToast(i, prev, '사용');
       }
       this._prevItems[i] = cur;
-      const driftPct = Math.max(0, Math.min(3, p.driftLevel || 0)) / 3 * 100;
-      panel.driftFill.style.width = `${driftPct}%`;
+
+      // 코너 차지 게이지: 폭은 연속값(chargeRatio), 색은 티어(charge 0..3).
+      const ratio = Math.max(0, Math.min(1, Number(p.chargeRatio) || 0));
+      const tier = Math.max(0, Math.min(3, Math.round(Number(p.charge) || 0)));
+      panel.chargeFill.style.width = `${ratio * 100}%`;
+      panel.chargeFill.style.background = tier > 0 ? CHARGE_COLORS[tier - 1] : 'rgba(255,255,255,0.35)';
 
       // Positioning based on splitLayout
       panel.el.style.top = '';
@@ -673,7 +824,8 @@ export class HUD {
     const t = this.toasts && this.toasts[i];
     const info = ITEM_INFO[itemKey];
     if (!t || !info) return;
-    t.icon.textContent = ITEM_ICONS[itemKey] || '❓';
+    t.icon.style.color = info.color;
+    t.icon.innerHTML = itemIconSVG(itemKey, 21);
     t.text.textContent = `${info.name} ${kind}`;
     t.sub.textContent = kind === '사용' ? info.short : '';
     t.el.style.borderLeftColor = info.color;

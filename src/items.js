@@ -31,11 +31,13 @@ const ITEM_TYPES = ['mushroom', 'shell', 'banana', 'star', 'balloon'];
 const _tmpVec = new THREE.Vector3(); // _spawnBalloon 전방 탐침용 (프레임당 할당 방지)
 
 export class ItemSystem {
-  constructor(scene, track) {
+  // items: assets.js가 만든 { box, orb } (각각 THREE.Group 템플릿, 로드 실패 시 null) — 3번째 인자 생략 시 전부 폴백.
+  constructor(scene, track, items) {
     this.scene = scene;
     this.track = track;
+    this._items = items || null;
 
-    // 공유 지오메트리/머티리얼
+    // 폴백용 공유 지오메트리/머티리얼 (해당 GLB 에셋이 없을 때만 실제로 쓰인다)
     this._boxGeo = new THREE.BoxGeometry(1.1, 1.1, 1.1);
     this._boxMat = new THREE.MeshStandardMaterial({
       color: 0x66ccff,
@@ -46,12 +48,13 @@ export class ItemSystem {
       roughness: 0.2,
       metalness: 0.1,
     });
-    this._shellGeo = new THREE.SphereGeometry(SHELL_RADIUS, 12, 8);
-    this._shellMat = new THREE.MeshStandardMaterial({ color: 0x22aa33, roughness: 0.4 });
-    this._bananaGeo = new THREE.ConeGeometry(0.35, 0.5, 8);
-    this._bananaMat = new THREE.MeshStandardMaterial({ color: 0xffdd33, roughness: 0.6 });
     this._balloonGeo = new THREE.SphereGeometry(0.35, 10, 8);
     this._balloonMat = new THREE.MeshStandardMaterial({ color: 0x3fb6e8, roughness: 0.3, metalness: 0.05 });
+
+    // 등껍질/바나나는 GLB 대체 모델이 없다 — 절차 생성 템플릿을 1회 만들고 인스턴스마다 clone()한다.
+    // (Object3D.clone()은 지오메트리/머티리얼을 참조 공유하고 계층만 복제하므로 비용이 낮다)
+    this._shellTemplate = this._buildShellTemplate();
+    this._bananaTemplate = this._buildBananaTemplate();
 
     // 아이템전/스피드전 모드 스위치. false면 박스가 숨고 픽업/사용/발사체 갱신이 멈춘다.
     this.enabled = true;
@@ -60,12 +63,13 @@ export class ItemSystem {
     this.boxes = [];
     const positions = (track && track.itemBoxPositions) || [];
     for (const p of positions) {
-      const mesh = new THREE.Mesh(this._boxGeo, this._boxMat);
+      const mesh = this._makeBoxMesh();
       mesh.position.copy(p); // track.itemBoxPositions가 이미 노면 높이(경사 포함) + 1.0으로 띄워서 준다
       scene.add(mesh);
       this.boxes.push({
         mesh,
         basePos: mesh.position.clone(),
+        baseScale: mesh.scale.clone(), // GLB 박스는 wrapper.scale(2.8)이 이미 박혀 있다 — 리스폰 시 이 값으로 복원
         active: true,
         respawnTimer: 0,
         spinPhase: Math.random() * Math.PI * 2,
@@ -79,7 +83,9 @@ export class ItemSystem {
   }
 
   // 맵 전환 시 main이 호출: 씬에 add한 것 전부 제거 + 자체 생성 GPU 리소스 해제.
-  // (지오메트리/머티리얼은 전부 이 클래스가 만든 것이라 dispose 대상이다)
+  // 공유 GLB 에셋(assets.items.box/orb)의 지오메트리/머티리얼은 이 클래스 소유가 아니므로
+  // (assets 캐시가 세션 전체에서 재사용) 여기서 dispose하지 않는다 — scene.remove만 한다.
+  // 폴백 지오메트리(_boxGeo 등)와 절차 생성 템플릿(shell/banana)은 이 인스턴스가 만든 것이라 dispose한다.
   dispose() {
     for (const box of this.boxes) this.scene.remove(box.mesh);
     this._clearProjectiles();
@@ -87,12 +93,91 @@ export class ItemSystem {
 
     this._boxGeo.dispose();
     this._boxMat.dispose();
-    this._shellGeo.dispose();
-    this._shellMat.dispose();
-    this._bananaGeo.dispose();
-    this._bananaMat.dispose();
     this._balloonGeo.dispose();
     this._balloonMat.dispose();
+    this._disposeTemplate(this._shellTemplate);
+    this._disposeTemplate(this._bananaTemplate);
+  }
+
+  // 절차 생성 템플릿(공유 GLB가 아닌, 이 인스턴스가 직접 만든 지오메트리/머티리얼) 해제.
+  // 인스턴스(clone)들은 이미 scene에서 제거된 뒤이며, clone은 지오메트리/머티리얼을 참조만
+  // 공유하므로 템플릿 자체를 한 번만 dispose하면 된다.
+  _disposeTemplate(group) {
+    if (!group) return;
+    group.traverse((obj) => {
+      if (!obj.isMesh) return;
+      obj.geometry.dispose();
+      obj.material.dispose();
+    });
+  }
+
+  // 아이템 박스 메시 생성: GLB 에셋이 있으면 clone(), 없으면 폴백 지오메트리로 만든 Mesh.
+  _makeBoxMesh() {
+    if (this._items && this._items.box) {
+      const mesh = this._items.box.clone();
+      mesh.userData.sharedAsset = true; // 공유 GLB 사본 표식 — dispose 금지 대상
+      return mesh;
+    }
+    return new THREE.Mesh(this._boxGeo, this._boxMat);
+  }
+
+  // 물풍선 발사체 메시 생성: GLB 에셋이 있으면 clone(), 없으면 폴백 지오메트리로 만든 Mesh.
+  _makeOrbMesh() {
+    if (this._items && this._items.orb) {
+      const mesh = this._items.orb.clone();
+      mesh.userData.sharedAsset = true;
+      return mesh;
+    }
+    return new THREE.Mesh(this._balloonGeo, this._balloonMat);
+  }
+
+  // 등껍질 절차 형상: 돔(초록) + 테(진초록 토러스) + 배(연베이지 원판). 그룹 원점 = 껍질 중심.
+  _buildShellTemplate() {
+    const group = new THREE.Group();
+    group.name = 'shell-template';
+
+    const domeGeo = new THREE.SphereGeometry(SHELL_RADIUS, 16, 10, 0, Math.PI * 2, 0, 1.15);
+    const domeMat = new THREE.MeshStandardMaterial({ color: 0x2f9e46, roughness: 0.35 });
+    group.add(new THREE.Mesh(domeGeo, domeMat));
+
+    const rimGeo = new THREE.TorusGeometry(0.42, 0.07, 8, 20);
+    rimGeo.rotateX(-Math.PI / 2);
+    const rimMat = new THREE.MeshStandardMaterial({ color: 0x1c6b30, roughness: 0.4 });
+    const rim = new THREE.Mesh(rimGeo, rimMat);
+    rim.position.y = 0;
+    group.add(rim);
+
+    const baseGeo = new THREE.CircleGeometry(SHELL_RADIUS, 16);
+    baseGeo.rotateX(Math.PI / 2);
+    const baseMat = new THREE.MeshStandardMaterial({ color: 0xe8d9a0, roughness: 0.6 });
+    const base = new THREE.Mesh(baseGeo, baseMat);
+    base.position.y = -0.02;
+    group.add(base);
+
+    return group;
+  }
+
+  // 바나나 절차 형상: 눕힌 호(몸통) + 꼭지(원기둥). 그룹 원점 = 몸통 원호의 중심.
+  _buildBananaTemplate() {
+    const group = new THREE.Group();
+    group.name = 'banana-template';
+    const R = 0.34;
+    const arc = Math.PI * 0.95;
+
+    const bodyGeo = new THREE.TorusGeometry(R, 0.11, 8, 14, arc);
+    bodyGeo.rotateX(-Math.PI / 2); // XZ 평면에 눕힘
+    const bodyMat = new THREE.MeshStandardMaterial({ color: 0xf0c62a, roughness: 0.55 });
+    group.add(new THREE.Mesh(bodyGeo, bodyMat));
+
+    const stemGeo = new THREE.CylinderGeometry(0.045, 0.03, 0.14, 6);
+    const stemMat = new THREE.MeshStandardMaterial({ color: 0x6b4a1e, roughness: 0.6 });
+    const stem = new THREE.Mesh(stemGeo, stemMat);
+    // 호 끝단(θ=arc)에 배치: rotateX(-90°) 후 (x,y,z) = (R·cosθ, 0, -R·sinθ)
+    stem.position.set(R * Math.cos(arc), 0.07, -R * Math.sin(arc));
+    stem.rotation.x = Math.PI / 2 - arc; // 접선 방향에 대략 맞춰 세움
+    group.add(stem);
+
+    return group;
   }
 
   // 아이템전 ⇄ 스피드전 전환. 비활성화 시 박스를 숨기고 픽업/사용을 막으며 날아다니는
@@ -127,15 +212,14 @@ export class ItemSystem {
     for (const box of this.boxes) {
       box.spinPhase += dt;
       if (box.active) {
-        box.mesh.rotation.y += dt * 2.0;
-        box.mesh.rotation.x += dt * 1.1;
+        box.mesh.rotation.y += dt * 1.4; // 텍스처가 있는 상자를 2축으로 굴리면 문양이 뒤집혀 읽혀 y축만 회전한다
         box.mesh.position.y = box.basePos.y + Math.sin(box.spinPhase * 2) * 0.12;
       } else {
         box.respawnTimer -= dt;
         if (box.respawnTimer <= 0) {
           box.active = true;
           box.mesh.visible = true;
-          box.mesh.scale.setScalar(1);
+          box.mesh.scale.copy(box.baseScale); // GLB 박스는 baseScale이 2.8 — setScalar(1)로 되돌리면 안 된다
         }
       }
     }
@@ -215,7 +299,7 @@ export class ItemSystem {
   _spawnShell(kart) {
     // 전방 = (-sin(heading), 0, -cos(heading)) — kart.js의 이동식과 동일한 규약
     const dir = new THREE.Vector3(-Math.sin(kart.heading), 0, -Math.cos(kart.heading));
-    const mesh = new THREE.Mesh(this._shellGeo, this._shellMat);
+    const mesh = this._shellTemplate.clone();
     mesh.position.copy(kart.position);
     mesh.position.y = kart.position.y + SHELL_HEIGHT; // kart.position.y는 이미 노면 높이 (경사에서도)
     mesh.position.addScaledVector(dir, 1.8); // 카트 앞에서 시작 (자기 자신 피격 방지)
@@ -237,9 +321,9 @@ export class ItemSystem {
     // back은 이후 -2.2 배 되므로 여기엔 '전방' 벡터를 넣어야 최종적으로 후방이 된다
     const back = new THREE.Vector3(-Math.sin(kart.heading), 0, -Math.cos(kart.heading));
     back.multiplyScalar(-2.2); // 뒤쪽
-    const mesh = new THREE.Mesh(this._bananaGeo, this._bananaMat);
+    const mesh = this._bananaTemplate.clone();
     mesh.position.copy(kart.position).add(back);
-    mesh.position.y = kart.position.y + 0.25; // kart.position.y는 노면 높이(경사 포함) — 그대로 따라온다
+    mesh.position.y = kart.position.y + 0.14; // kart.position.y는 노면 높이(경사 포함) — 그대로 따라온다. 튜브 반지름(0.11)+여유
     this.scene.add(mesh);
     this.bananas.push({ mesh, owner: kart, armTimer: 0.6 }); // 설치 직후 주인 무시
   }
@@ -307,7 +391,7 @@ export class ItemSystem {
   _spawnBalloon(kart) {
     // 전방 = (-sin(heading), 0, -cos(heading)) — kart.js의 이동식과 동일한 규약
     const dir = new THREE.Vector3(-Math.sin(kart.heading), 0, -Math.cos(kart.heading));
-    const mesh = new THREE.Mesh(this._balloonGeo, this._balloonMat);
+    const mesh = this._makeOrbMesh();
     mesh.position.copy(kart.position).addScaledVector(dir, 1.6);
     mesh.position.y += BALLOON_SPAWN_H;
     this.scene.add(mesh);
