@@ -209,6 +209,18 @@ class _StreamHandler(BaseHTTPRequestHandler):
             pass           # 브라우저가 창을 닫으면 정상적으로 끊긴다
 
 
+def already_running():
+    """다른 인스턴스가 이미 떠 있는지. 스트림 포트를 잠금으로 쓴다.
+
+    두 개가 동시에 돌면 카메라와 가상 패드가 중복으로 잡히고, 창을 하나 닫아도
+    다른 쪽이 계속 그려서 '꺼도 다시 켜지는' 것처럼 보인다.
+    """
+    import socket as _s
+    with _s.socket(_s.AF_INET, _s.SOCK_STREAM) as sk:
+        sk.settimeout(0.3)
+        return sk.connect_ex(("127.0.0.1", STREAM_PORT)) == 0
+
+
 def start_stream_server():
     try:
         srv = ThreadingHTTPServer(("127.0.0.1", STREAM_PORT), _StreamHandler)
@@ -762,8 +774,24 @@ def selftest():
     print("\n자체 점검 통과. 렌즈 캡을 벗기고 그냥 실행하면 된다.")
 
 
+def window_closed(players):
+    """미리보기 창이 하나라도 사라졌으면 True. (X 버튼으로 닫은 경우)"""
+    for p in players:
+        try:
+            if cv2.getWindowProperty(f"{p.name} Camera", cv2.WND_PROP_VISIBLE) < 1:
+                return True
+        except cv2.error:
+            return True          # 창 자체가 없어진 경우
+    return False
+
+
 def main(tune=False, show_window=True):
     validate_map()
+    if already_running():
+        print(f"이미 실행 중이다(포트 {STREAM_PORT} 사용 중). 창을 두 개 띄우면")
+        print("카메라와 가상 패드가 중복으로 잡혀 하나를 닫아도 다른 쪽이 계속 그린다.")
+        print("기존 창에서 q 를 누르거나 그 콘솔에서 Ctrl+C 로 먼저 종료하라.")
+        return
     cams = resolve_cameras()
     if not cams:
         print("카메라가 없어 손동작 조작을 시작할 수 없다. 키보드로 플레이하라.")
@@ -771,7 +799,8 @@ def main(tune=False, show_window=True):
     snapshot_defaults()
     if show_window:
         print("미리보기 창에서 조절: 1/2 fist  3/4 open  5/6 gapMin  7/8 maxY  9/0 angle"
-              "   |   r 초기화   s 현재값 출력   q 종료")
+              "   |   r 초기화   s 현재값 출력")
+        print("종료: 창에서 q 또는 Esc, 창을 X 로 닫아도 된다.")
     start_stream_server()
 
     players = []
@@ -788,10 +817,15 @@ def main(tune=False, show_window=True):
                     cv2.imshow(f"{p.name} Camera", f)
             if show_window:
                 k = cv2.waitKey(1) & 0xFF
-                if k == ord("q"):
+                if k == ord("q") or k == 27:      # q 또는 Esc
                     break
                 if k != 255:
                     handle_tune_key(k)
+                # 창을 X 로 닫았는지 확인한다. imshow 는 매 프레임 창을 다시 만들기 때문에
+                # 이 검사가 없으면 닫아도 곧바로 되살아난다.
+                if window_closed(players):
+                    print("창이 닫혀 종료한다.")
+                    break
             else:
                 time.sleep(0.001)
     finally:
