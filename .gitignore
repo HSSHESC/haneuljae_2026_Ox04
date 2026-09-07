@@ -11,3 +11,7 @@ design/font-b64.txt
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# 손 인식 모델 (약 8MB) — README의 링크에서 받는다
+handsteer/hand_landmarker.task
+handsteer/__pycache__/
