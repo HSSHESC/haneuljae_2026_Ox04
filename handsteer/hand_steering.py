@@ -35,7 +35,11 @@ import time
 
 os.environ["GLOG_minloglevel"] = "2"
 
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
 import cv2
+import numpy as np
 import mediapipe as mp
 import vgamepad as vg
 from mediapipe.tasks import python as mp_python
@@ -51,7 +55,8 @@ CAPTURE_HEIGHT = 720
 
 # 가운데에서 가로폭의 이 비율만큼만 남기고 양옆을 잘라낸다.
 # 사람 한 명의 상반신과 양손이 딱 들어올 정도로 현장에서 조정할 것.
-CROP_WIDTH_RATIO = 0.35
+# 카메라 1대에 한 사람이면 1.0(전체 폭)이 맞다. 두 사람이 나란히 앉을 때만 좁힌다.
+CROP_WIDTH_RATIO = 1.0
 
 # 웹캠을 물리적으로 90도 돌려 거치했다면 True (크롭 대신 회전을 쓴다)
 CAMERA_IS_PHYSICALLY_ROTATED = False
@@ -64,10 +69,19 @@ HANDLE_MAX_Y = 0.80         # 양손 평균 높이가 이보다 아래로 내려
 HANDLE_MIN_GAP = 1.2        # 손목 간격 / 손 크기 — 이보다 좁으면 핸들 자세로 안 봄
 HANDLE_MAX_GAP = 12.0       # 이보다 넓어도 핸들 자세로 안 봄
 PUMP_WINDOW = 2.0           # 폈다 쥐었다를 이 시간(초) 안에 2회 해야 성립
+DETECT_CONFIDENCE = 0.3     # 손 최초 검출 문턱 — 주먹은 팜 디텍터가 놓치기 쉬워 낮게 잡았다
+TRACK_CONFIDENCE = 0.3      # 추적 유지 문턱
 EDGE_COOLDOWN = 0.45        # 같은 제스처가 다시 발동하기까지 최소 간격(초)
 
 HAND_MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                "hand_landmarker.task")
+
+# ================= 표시 ================= #
+VIEW_HEIGHT = 620           # 미리보기 창 높이(px). 화면이 작으면 줄여라.
+STREAM_PORT = 8090          # 게임 화면에 손 영상을 띄우기 위한 MJPEG 포트
+STREAM_WIDTH = 320          # 게임에 보낼 영상 가로폭(px)
+PANEL_WIDTH = 360           # 오른쪽 상태판 폭
+BUTTON_FLASH = 0.6          # 눌린 버튼을 화면에 붙잡아 두는 시간(초)
 
 
 # ================= 제스처 → 패드 버튼 매핑 ================= #
@@ -112,6 +126,70 @@ BUTTONS = {
 }
 
 GESTURE_NAMES = ("hands_open", "double_pump", "one_fist", "hands_apart", "no_handle")
+
+# ================= 게임 화면용 MJPEG 스트림 ================= #
+# 게임(브라우저)이 <img src="http://localhost:8090/p1"> 로 받아 화면 모서리에 띄운다.
+# 카메라를 파이썬이 점유하므로 브라우저가 직접 getUserMedia 로 열 수는 없다 — 그래서 중계한다.
+
+_frames = {}                      # "p1" / "p2" → 최신 JPEG 바이트
+_frames_lock = threading.Lock()
+
+
+def publish_frame(key, jpeg_bytes):
+    with _frames_lock:
+        _frames[key] = jpeg_bytes
+
+
+class _StreamHandler(BaseHTTPRequestHandler):
+    def log_message(self, *a):     # 요청 로그로 콘솔을 더럽히지 않는다
+        pass
+
+    def do_GET(self):
+        key = self.path.strip("/").lower()
+        if key not in ("p1", "p2"):
+            self.send_error(404)
+            return
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+        self.end_headers()
+        try:
+            while True:
+                with _frames_lock:
+                    buf = _frames.get(key)
+                if buf is not None:
+                    self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\n"
+                                     b"Content-Length: " + str(len(buf)).encode() + b"\r\n\r\n")
+                    self.wfile.write(buf)
+                    self.wfile.write(b"\r\n")
+                time.sleep(0.05)
+        except (BrokenPipeError, ConnectionResetError):
+            pass           # 브라우저가 창을 닫으면 정상적으로 끊긴다
+
+
+def start_stream_server():
+    try:
+        srv = ThreadingHTTPServer(("127.0.0.1", STREAM_PORT), _StreamHandler)
+    except OSError as e:
+        print(f"[경고] 스트림 서버를 열지 못했다(포트 {STREAM_PORT}): {e}")
+        print("       게임 안 손 영상만 안 뜬다. 조작 자체는 정상 동작한다.")
+        return None
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    print(f"손 영상 스트림: http://localhost:{STREAM_PORT}/p1  (게임이 자동으로 받아 간다)")
+    return srv
+
+
+# MediaPipe 손 랜드마크 21개를 잇는 뼈대 — 점만 찍는 것보다 손 모양이 훨씬 잘 읽힌다.
+HAND_BONES = (
+    (0, 1), (1, 2), (2, 3), (3, 4),            # 엄지
+    (0, 5), (5, 6), (6, 7), (7, 8),            # 검지
+    (5, 9), (9, 10), (10, 11), (11, 12),       # 중지
+    (9, 13), (13, 14), (14, 15), (15, 16),     # 약지
+    (13, 17), (17, 18), (18, 19), (19, 20),    # 새끼
+    (0, 17),                                   # 손바닥 아래
+)
 
 
 def buttons_for(gesture):
@@ -171,8 +249,8 @@ def make_landmarker():
         base_options=mp_python.BaseOptions(model_asset_buffer=model_bytes),
         running_mode=mp_vision.RunningMode.VIDEO,
         num_hands=2,
-        min_hand_detection_confidence=0.6,
-        min_tracking_confidence=0.6,
+        min_hand_detection_confidence=DETECT_CONFIDENCE,
+        min_tracking_confidence=TRACK_CONFIDENCE,
     )
     return mp_vision.HandLandmarker.create_from_options(options)
 
@@ -216,6 +294,11 @@ class PlayerCam:
         self.hands_were_open = False
         self.pump_count = 0
         self.pump_started = 0.0
+        # 표시용
+        self.fps = 0.0
+        self._last_frame_t = time.perf_counter()
+        self.recent_buttons = {}   # 버튼명 → 눌린 시각 (BUTTON_FLASH 동안 표시)
+        self.full_frame = None     # 크롭 전 원본 (크롭 영역 안내용)
 
     def reframe(self, frame):
         if CAMERA_IS_PHYSICALLY_ROTATED:
@@ -333,40 +416,186 @@ class PlayerCam:
         gp.update()
         return fired
 
-    def draw(self, frame, info, fired, tune):
+    # ── 표시 ───────────────────────────────────────────────
+    def _draw_hands(self, frame, info):
         h, w = frame.shape[:2]
         for landmarks in info["hands"]:
-            for lm in landmarks:
-                cv2.circle(frame, (int(lm.x * w), int(lm.y * h)), 4, (255, 255, 0), -1)
+            pts = [(int(lm.x * w), int(lm.y * h)) for lm in landmarks]
+            for a, b in HAND_BONES:
+                cv2.line(frame, pts[a], pts[b], (90, 220, 90), 2)
+            for i, (cx, cy) in enumerate(pts):
+                # 손목은 크게, 손끝 4개는 노랗게 — 쥐고 편 게 눈에 들어온다
+                if i == 0:
+                    cv2.circle(frame, (cx, cy), 7, (255, 120, 0), -1)
+                elif i in (4, 8, 12, 16, 20):
+                    cv2.circle(frame, (cx, cy), 5, (0, 255, 255), -1)
+                else:
+                    cv2.circle(frame, (cx, cy), 3, (255, 255, 255), -1)
+        return frame
 
-        def put(text, y, color=(0, 255, 0), scale=0.6):
-            cv2.putText(frame, text, (10, y), cv2.FONT_HERSHEY_SIMPLEX, scale, color, 2)
+    def _panel(self, info, fired, tune, height):
+        """오른쪽 상태판을 그린다."""
+        p = np.zeros((height, PANEL_WIDTH, 3), dtype=np.uint8)
+        p[:] = (28, 28, 32)
 
-        put(self.name + ("  [TUNE]" if tune else ""), 30, (0, 255, 0), 0.9)
-        put("HANDLE / accel" if info["handle"] else "no handle / coast", 58,
-            (0, 255, 0) if info["handle"] else (0, 165, 255), 0.7)
-        put(f"angle {info['angle']:+6.1f}  steer {info['steer']:+.2f}", 84)
-        put(f"hands {len(info['hands'])}  open {info['open_n']}  gap {info['gap']:.2f}", 108)
-        put(f"pump {self.pump_count}/2", 132, (200, 200, 255))
+        def text(t, y, color=(230, 230, 230), scale=0.5, thick=1, x=12):
+            cv2.putText(p, t, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, color, thick, cv2.LINE_AA)
 
-        y = 162
+        def bar(y, frac, color, h=14, label=""):
+            x0, x1 = 12, PANEL_WIDTH - 12
+            cv2.rectangle(p, (x0, y), (x1, y + h), (60, 60, 66), -1)
+            wpx = int((x1 - x0) * max(0.0, min(1.0, frac)))
+            if wpx > 0:
+                cv2.rectangle(p, (x0, y), (x0 + wpx, y + h), color, -1)
+            if label:
+                text(label, y + h - 2, (200, 200, 200), 0.42, 1, x1 - 52)
+
+        y = 30
+        text(f"{self.name}{'   [TUNE]' if tune else ''}", y, (120, 230, 255), 0.75, 2); y += 12
+        text(f"{self.fps:4.1f} fps", y, (140, 140, 150), 0.45, 1, PANEL_WIDTH - 78)
+        y += 26
+
+        # 손 검출 상태 — 제일 궁금한 것
+        n = len(info["hands"])
+        if n == 0:
+            text("NO HANDS", y, (80, 80, 255), 0.8, 2)
+        elif n == 1:
+            text("1 HAND (need 2)", y, (0, 165, 255), 0.62, 2)
+        else:
+            text("2 HANDS", y, (120, 255, 120), 0.8, 2)
+        y += 30
+
+        # 핸들 자세 = 가속
+        if info["handle"]:
+            cv2.rectangle(p, (10, y - 18), (PANEL_WIDTH - 10, y + 8), (0, 110, 0), -1)
+            text("HANDLE  ->  ACCEL", y, (180, 255, 180), 0.62, 2)
+        else:
+            cv2.rectangle(p, (10, y - 18), (PANEL_WIDTH - 10, y + 8), (0, 60, 110), -1)
+            text("NO HANDLE -> COAST", y, (180, 220, 255), 0.58, 2)
+        y += 34
+
+        # 조향 바 (가운데가 0)
+        text("STEER", y, (170, 170, 180), 0.45); y += 8
+        x0, x1 = 12, PANEL_WIDTH - 12
+        mid = (x0 + x1) // 2
+        cv2.rectangle(p, (x0, y), (x1, y + 18), (60, 60, 66), -1)
+        sv = info["steer"]
+        if abs(sv) > 0.01:
+            xa, xb = (mid, mid + int((x1 - mid) * sv)) if sv > 0 else (mid + int((mid - x0) * sv), mid)
+            cv2.rectangle(p, (min(xa, xb), y), (max(xa, xb), y + 18), (0, 200, 255), -1)
+        cv2.line(p, (mid, y - 3), (mid, y + 21), (200, 200, 200), 1)
+        text(f"{sv:+.2f}", y + 14, (255, 255, 255), 0.45, 1, x1 - 46)
+        y += 32
+        text(f"angle {info['angle']:+6.1f} deg", y, (170, 170, 180), 0.45); y += 22
+
+        # 손 상태 수치
+        text(f"open {info['open_n']}/2   gap {info['gap']:.2f}   y {info['mid_y']:.2f}", y,
+             (170, 170, 180), 0.45)
+        y += 22
+        bar(y, self.pump_count / 2.0, (255, 180, 0), 12, f"pump {self.pump_count}/2")
+        y += 30
+
+        # 제스처 목록
+        text("GESTURES", y, (150, 150, 160), 0.45); y += 20
         for g in GESTURE_NAMES:
             on = g in info["active"]
             btns = buttons_for(g)
-            color = (0, 220, 255) if g in fired else ((255, 255, 255) if on else (110, 110, 110))
-            put(f"{g:<13} {'+'.join(btns) if btns else '-'}", y, color, 0.52)
-            y += 22
-        return frame
+            if g in fired:
+                col, mark = (0, 220, 255), ">"
+            elif on:
+                col, mark = (255, 255, 255), "*"
+            else:
+                col, mark = (100, 100, 106), " "
+            text(f"{mark} {g:<12} {'+'.join(btns) if btns else '-'}", y, col, 0.45)
+            y += 20
+
+        # 방금 눌린 버튼 — 크게
+        y += 8
+        text("BUTTON", y, (150, 150, 160), 0.45); y += 26
+        now = time.perf_counter()
+        live = [b for b, t in self.recent_buttons.items() if now - t < BUTTON_FLASH]
+        if live:
+            cv2.rectangle(p, (10, y - 22), (PANEL_WIDTH - 10, y + 10), (0, 140, 200), -1)
+            text("  ".join(live), y, (255, 255, 255), 0.9, 2)
+        else:
+            text("-", y, (100, 100, 106), 0.6)
+        return p
+
+    def _thumb(self, panel):
+        """크롭 전 원본을 작게 붙이고 크롭 영역을 표시한다 — 프레임 안에 있는지 확인용."""
+        if self.full_frame is None or CAMERA_IS_PHYSICALLY_ROTATED:
+            return panel
+        fh, fw = self.full_frame.shape[:2]
+        tw = PANEL_WIDTH - 24
+        th = max(1, int(tw * fh / fw))
+        thumb = cv2.resize(self.full_frame, (tw, th))
+        crop_w = int(tw * CROP_WIDTH_RATIO)
+        x1 = (tw - crop_w) // 2
+        cv2.rectangle(thumb, (x1, 0), (x1 + crop_w, th - 1), (0, 220, 255), 2)
+        cv2.putText(thumb, "in-frame area", (x1 + 4, 16), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.4, (0, 220, 255), 1, cv2.LINE_AA)
+        ph = panel.shape[0]
+        y0 = ph - th - 12
+        if y0 > 0:
+            panel[y0:y0 + th, 12:12 + tw] = thumb
+        return panel
+
+    def compose(self, frame, info, fired, tune):
+        frame = self._draw_hands(frame, info)
+        fh, fw = frame.shape[:2]
+        scale = VIEW_HEIGHT / fh
+        view = cv2.resize(frame, (max(1, int(fw * scale)), VIEW_HEIGHT))
+        panel = self._panel(info, fired, tune, VIEW_HEIGHT)
+        panel = self._thumb(panel)
+        return np.hstack([view, panel])
 
     def step(self, tune):
         ok, frame = self.cap.read()
         if not ok or frame is None:
             return None
+        now = time.perf_counter()
+        dt = now - self._last_frame_t
+        self._last_frame_t = now
+        if dt > 0:
+            self.fps = self.fps * 0.8 + (1.0 / dt) * 0.2 if self.fps else 1.0 / dt
+
         frame = cv2.flip(frame, 1)          # 거울 모드 — 오른손을 들면 화면 오른쪽
+        self.full_frame = frame.copy()
         frame = self.reframe(frame)
         info = self.detect(frame)
         fired = self.send(info, dry_run=tune)
-        return self.draw(frame, info, fired, tune)
+        for g in fired:
+            for b in buttons_for(g):
+                self.recent_buttons[b] = now
+
+        self._publish(frame, info)
+        return self.compose(frame, info, fired, tune)
+
+    def _publish(self, frame, info):
+        """게임 화면에 띄울 작은 영상을 만들어 스트림에 올린다."""
+        fh, fw = frame.shape[:2]
+        scale = STREAM_WIDTH / fw
+        small = cv2.resize(frame, (STREAM_WIDTH, max(1, int(fh * scale))))
+        n = len(info["hands"])
+        if info["handle"]:
+            label, color = "ACCEL", (120, 255, 120)
+        elif n == 0:
+            label, color = "NO HANDS", (80, 80, 255)
+        elif n == 1:
+            label, color = "1 HAND", (0, 165, 255)
+        else:
+            label, color = "COAST", (180, 220, 255)
+        h2 = small.shape[0]
+        cv2.rectangle(small, (0, h2 - 26), (STREAM_WIDTH, h2), (20, 20, 24), -1)
+        cv2.putText(small, f"{self.name}  {label}", (8, h2 - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
+        if abs(info["steer"]) > 0.01:   # 조향 막대
+            mid = STREAM_WIDTH // 2
+            x = mid + int((STREAM_WIDTH // 2 - 8) * info["steer"])
+            cv2.line(small, (mid, h2 - 30), (x, h2 - 30), (0, 200, 255), 3)
+        ok, enc = cv2.imencode(".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, 70])
+        if ok:
+            publish_frame(self.name.lower(), enc.tobytes())
 
     def release(self):
         self.gamepad.reset()
@@ -407,6 +636,7 @@ def main(tune=False):
     if P2_CAM_INDEX is not None:
         cams.append(("P2", P2_CAM_INDEX))
     print(f"카메라 {len(cams)}대 사용: " + ", ".join(f"{n}=#{i}" for n, i in cams))
+    start_stream_server()
 
     players = []
     try:

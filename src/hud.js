@@ -6,6 +6,10 @@
 //  - 드리프트 게이지 제거. kart.cornerCharge(0..3) / kart.chargeRatio(0..1) 기반 '코너 차지' 게이지로 교체.
 //  - 아이템 아이콘: 이모지 → 인라인 SVG(itemIconSVG). 폰트 의존/로드 실패 경로가 없다.
 //  - 메뉴 포커스 박스: setTitleFocus / setResultsFocus (WASD 4키 조작에 대응하는 시각 표시).
+//
+// v6 변경점
+//  - 아이템전 전용화: 게임 모드 UI(setGameMode / 모드 행 / 모드 CSS) 제거. 타이틀 포커스 항목은 맵 하나뿐이다.
+//  - 결과 화면 자동 복귀 잔여시간 표시: setResultsTimeout(sec) 추가(RESULTS 제목과 기록 목록 사이).
 
 // 아이템 아이콘 — 24×24 viewBox 인라인 SVG. fill="currentColor"라 부모의 color가 그대로 주 색이 된다.
 // 이모지를 쓰지 않는 이유: 폰트마다 모양이 달라지고, 크기/정렬을 CSS로 제어할 수 없다.
