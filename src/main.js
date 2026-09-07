@@ -24,6 +24,20 @@ const MAP_STORAGE_KEY = 'kart-map';
 const MAP_HOLD_ON = 0.5;        // 이 값을 넘으면 "기울인 상태"로 본다
 const MAP_HOLD_OFF = 0.3;       // 여기까지 돌아와야 놓은 것으로 본다(히스테리시스)
 const MAP_HOLD_INTERVAL = 1.0;  // 유지하는 동안 한 칸 넘어가는 간격(초). 첫 입력은 즉시 1회.
+// 아날로그 조향이 이 시간 안에 되돌아오면 "놓았다 다시 기울였다"가 아니라 "계속 유지 중"으로 본다.
+// handsteer는 스무딩 없이 매 프레임 steer를 새로 만들기 때문에(양손 검출이 한 번만 실패해도 0)
+// 이 유예가 없으면 검출 흔들림만큼 즉시 전환이 되살아나 초당 여러 칸이 넘어간다.
+// 상한은 "일부러 놓았다 다시 누르는" 최단 간격(≈0.3s)보다 확실히 작아야 한다.
+const MAP_RESUME_GRACE = 0.15;
+// 십자키는 유지 상태를 직접 볼 수 없어 getMenuInput() 엣지 간격으로 역산한다.
+// 아래 두 값은 input.js의 메뉴 리피트 상수와 반드시 같아야 한다(§B-5: 최초 1회 + 0.35s 후 0.13s 간격).
+// input.js는 dt를 누적해 임계를 넘는 첫 프레임에 엣지를 내므로, 실제 엣지 간격은
+// 임계값 이상 "임계값 + 그 프레임의 dt" 미만이다. 판정 창을 고정 상수로 두면 특정 프레임레이트
+// (예: 31fps → 0.13+0.032 = 0.162s)에서 리피트가 창 밖으로 나가 연타로 오인된다.
+const MENU_REPEAT_DELAY = 0.35; // input.js MENU_REPEAT_DELAY
+const MENU_REPEAT_RATE = 0.13;  // input.js MENU_REPEAT_RATE
+const DT_CAP = 0.05;            // 루프가 dt에 거는 상한 — 리피트 엣지가 늦어질 수 있는 최대폭
+const MENU_EDGE_IDLE = 9;       // "직전 엣지 없음"을 뜻하는 충분히 큰 경과 시간(초)
 
 // ───────────────────────────────── 렌더러 / 씬 ─────────────────────────────────
 
@@ -101,8 +115,12 @@ let prev = [];               // 효과음 edge 검출용 직전 프레임 스냅
 
 let mapIndex = 0;
 let mapSteerLatch = 0;       // 0 | -1 | 1 — 아날로그 조향 유지 래치(히스테리시스)
-let mapHoldTimer = 0;        // 같은 방향을 유지한 시간(초)
-let mapEdgeGate = 0;         // 십자키 엣지 최소 간격 잠금(초). 유지 상태를 알 수 없는 소스용.
+let mapHoldDir = 0;          // 케이던스가 붙어 있는 방향(신호가 끊겨도 남는다)
+let mapHoldTimer = 0;        // 마지막 반영 이후 경과(초)
+let mapIdleTimer = MENU_EDGE_IDLE;  // 그 방향 신호가 끊긴 뒤 경과(초)
+let mapEdgeSince = MENU_EDGE_IDLE;  // 마지막 메뉴 엣지 이후 경과(초)
+let mapPendingDir = 0;       // 리피트 첫 타인지 연타인지 판정을 미뤄 둔 엣지 방향(0 = 없음)
+let mapPendingTimer = 0;     // 그 판정 유예 잔여(초)
 const RESULT_ITEMS = 2;      // 재시작 / 타이틀로
 let resultFocus = 0;         // 0 = 재시작, 1 = 타이틀로
 
@@ -179,38 +197,96 @@ function cancelMapPreview() {
   if (mapPreviewTimer !== null) { clearTimeout(mapPreviewTimer); mapPreviewTimer = null; }
 }
 
-// 타이틀 맵 선택. 첫 입력은 즉시 1칸, 유지하는 동안은 정확히 1.0초마다 1칸.
+// 한 칸 반영. continuation=false면 "새 입력"이라 즉시 1칸 + 케이던스 재시작,
+// true면 "누르고 있는 중"이라 1.0초 케이던스에만 맡긴다.
+// 프레임 시간은 mapIdleTimer 아니면 mapHoldTimer 어느 한쪽에 정확히 한 번만 쌓이므로,
+// 신호가 잠깐 끊겼다 돌아와도 케이던스는 실제 경과 시간을 그대로 따라간다.
+function applyMapStep(dir, continuation, dt) {
+  if (!continuation) {
+    mapHoldDir = dir;
+    mapHoldTimer = 0;
+    mapIdleTimer = 0;
+    setMapIndex(mapIndex + dir, true);
+    return;
+  }
+  mapHoldDir = dir;
+  mapHoldTimer += dt + mapIdleTimer;
+  mapIdleTimer = 0;
+  if (mapHoldTimer >= MAP_HOLD_INTERVAL) {
+    mapHoldTimer -= MAP_HOLD_INTERVAL;   // = 0 이 아니라 감산 — 케이던스가 프레임마다 밀리지 않는다
+    setMapIndex(mapIndex + dir, true);
+  }
+}
+
+// 판정을 보류해 둔 엣지가 있으면 "개별 입력이었다"로 확정하고 반영한다.
+// 보류분을 그냥 버리면(다른 방향 엣지나 아날로그가 끼어들 때) 누른 입력 한 칸이 통째로 사라진다.
+function flushPendingMapStep(dt) {
+  if (mapPendingDir === 0) return;
+  const dir = mapPendingDir;
+  mapPendingDir = 0;
+  applyMapStep(dir, false, dt);
+}
+
+// 타이틀 맵 선택. 새 입력은 즉시 1칸, 누르고 있는 동안은 1.0초마다 1칸.
 // input.js의 메뉴 리피트(0.35s 후 0.13s)를 그대로 쓰면 손으로 핸들을 기울인 채 두었을 때
 // 맵이 초당 7칸씩 넘어간다. 그래서 유지 상태를 여기서 직접 잰다.
 //  - steerRaw: P0/P1 raw steer 중 절댓값이 큰 쪽(감도 배율을 타지 않은 값 — 설정 감도와 무관하게 동일 동작)
 //  - edgeDir : getMenuInput()의 left/right 엣지(패드 십자키처럼 유지 상태를 알 수 없는 소스용)
+//
+// 두 소스는 "유지 중인가"를 아는 방법이 달라 판정도 따로 한다.
+//  · 아날로그(손 조향·좌스틱·키보드): 래치가 0으로 풀린 시간이 MAP_RESUME_GRACE 미만이면 유지로 본다.
+//    한 프레임짜리 검출 끊김을 '새로 기울였다'로 받으면 즉시 전환 분기가 게이트를 통째로 우회한다.
+//  · 엣지(십자키): 엣지 간격으로 리피트를 역산한다. `0.13 + dt` 이하 = 리피트 확정(유지),
+//    `[0.35, 0.35 + dt]` = 리피트 첫 타와 연타가 겹치는 구간이라 둘째 리피트가 올 때까지 판정 보류,
+//    그 밖 = 연타 확정이라 즉시 반영. 이 구분이 없으면 눌렀다 뗀 개별 입력까지 초당 1칸으로 묶인다.
+//    두 상한이 dt에 비례하는 이유는 위 상수 주석 참조.
 function updateMapSelect(dt, steerRaw, edgeDir) {
   const s = steerRaw || 0;
-  const prevLatch = mapSteerLatch;
   if (Math.abs(s) > MAP_HOLD_ON) mapSteerLatch = s > 0 ? 1 : -1;   // 방향 전환은 중립을 거치지 않아도 인정(A↔D)
   else if (Math.abs(s) < MAP_HOLD_OFF) mapSteerLatch = 0;
 
+  mapEdgeSince += dt;
+
   if (mapSteerLatch !== 0) {
-    if (mapSteerLatch !== prevLatch) {           // 새로 기울였다 / 방향을 바꿨다 → 즉시 1회
-      mapHoldTimer = 0;
-      setMapIndex(mapIndex + mapSteerLatch, true);
-    } else {
-      mapHoldTimer += dt;
-      if (mapHoldTimer >= MAP_HOLD_INTERVAL) {
-        mapHoldTimer -= MAP_HOLD_INTERVAL;       // = 0 이 아니라 감산 — 케이던스가 프레임마다 밀리지 않는다
-        setMapIndex(mapIndex + mapSteerLatch, true);
-      }
-    }
-    mapEdgeGate = MAP_HOLD_INTERVAL;             // 같은 입력이 엣지 경로로 다시 들어와 두 칸 가지 않게
+    // 같은 스틱/키가 만드는 메뉴 엣지는 여기서 무시한다(한 입력에 두 칸 방지).
+    // 엣지 시계를 비워 두므로, 스틱을 놓은 직후의 십자키 입력은 '새 입력'으로 즉시 반영된다
+    // (아날로그 유지가 십자키를 1초 먹통으로 만들지 않는다).
+    mapEdgeSince = MENU_EDGE_IDLE;
+    flushPendingMapStep(dt);   // 십자키에서 보류 중이던 칸은 별개 입력이다 — 삼키지 않는다
+    // 방향 반전(-1↔+1)은 언제나 즉시. 같은 방향은 끊김이 짧았을 때만 유지로 본다.
+    const held = mapSteerLatch === mapHoldDir && mapIdleTimer <= MAP_RESUME_GRACE;
+    applyMapStep(mapSteerLatch, held, dt);
     return;
   }
 
-  mapHoldTimer = 0;
-  mapEdgeGate = Math.max(0, mapEdgeGate - dt);
-  if (edgeDir !== 0 && mapEdgeGate <= 0) {       // 십자키: 엣지만 받고 1초에 한 번만 통과시킨다
-    mapEdgeGate = MAP_HOLD_INTERVAL;
-    setMapIndex(mapIndex + edgeDir, true);
+  if (edgeDir !== 0) {
+    const gap = mapEdgeSince;
+    mapEdgeSince = 0;
+    if (gap <= MENU_REPEAT_RATE + dt) {          // 사람이 낼 수 없는 간격 → 리피트 = 누르고 있는 중
+      if (mapPendingDir === edgeDir) mapPendingDir = 0;  // 보류분은 이 리피트의 첫 타였다 → 취소
+      else flushPendingMapStep(dt);              // 다른 입력이었으므로 삼키지 않고 반영
+      applyMapStep(edgeDir, edgeDir === mapHoldDir, dt);
+      return;
+    }
+    if (edgeDir === mapHoldDir && gap >= MENU_REPEAT_DELAY - 1e-6 && gap <= MENU_REPEAT_DELAY + dt) {
+      mapPendingDir = edgeDir;                   // 리피트 첫 타인지 연타인지 아직 모른다
+      mapPendingTimer = MENU_REPEAT_RATE + DT_CAP;  // 둘째 리피트는 늦어도 이 안에 온다
+      mapIdleTimer += dt;
+      return;
+    }
+    flushPendingMapStep(dt);
+    applyMapStep(edgeDir, false, dt);            // 연타 확정 → 즉시 1칸
+    return;
   }
+
+  if (mapPendingDir !== 0) {
+    mapPendingTimer -= dt;
+    if (mapPendingTimer <= 0) {                  // 둘째 리피트가 오지 않았다 → 개별 입력이었다
+      flushPendingMapStep(dt);
+      return;
+    }
+  }
+  mapIdleTimer += dt;
 }
 
 // ───────────────────────────────── 씬 구성 (맵 전환) ─────────────────────────────────
@@ -457,8 +533,11 @@ function goToTitle() {
   const heldB = inputManager ? (inputManager.getPlayerInput(1).steer || 0) : 0;
   const held = Math.abs(heldA) >= Math.abs(heldB) ? heldA : heldB;
   mapSteerLatch = Math.abs(held) > MAP_HOLD_ON ? (held > 0 ? 1 : -1) : 0;
-  mapHoldTimer = 0;   // 유지한 채 들어와도 첫 전환은 진입 1.0초 뒤
-  mapEdgeGate = 0;
+  mapHoldDir = mapSteerLatch;   // 유지 중인 것으로 잡아 둔다 → 첫 전환은 진입 1.0초 뒤(즉시 1칸이 아니다)
+  mapHoldTimer = 0;
+  mapIdleTimer = 0;
+  mapEdgeSince = MENU_EDGE_IDLE;   // 진입 직후의 십자키 입력은 새 입력이다
+  mapPendingDir = 0;
   raceTime = 0;
   state = 'title';
   // 타이틀 포커스 항목은 맵 하나뿐이다 — 매 프레임 갱신하지 않고 진입 시 한 번만 맞춘다.
@@ -612,7 +691,7 @@ function frame(now) {
   let dt = (now - lastTime) / 1000;
   lastTime = now;
   if (!isFinite(dt) || dt < 0) dt = 0;
-  dt = Math.min(dt, 0.05); // 탭 복귀 등 큰 점프 방지
+  dt = Math.min(dt, DT_CAP); // 탭 복귀 등 큰 점프 방지 (맵 선택의 리피트 판정 창이 이 상한에 의존한다)
 
   inputManager.poll(dt);   // 메뉴 입력 리피트 타이밍에 dt가 필요하다
 

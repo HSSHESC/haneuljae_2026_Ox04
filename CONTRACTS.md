@@ -1,6 +1,26 @@
-# Kart Game — Module Contracts (v4, as-built)
+# Kart Game — Module Contracts (v5, as-built)
 
 3D 마리오카트풍 2인 대전 레이싱. Three.js, ES modules.
+
+> **v4 → v5 변경 (드리프트 제거 · WASD 메뉴 · 아이템전 전용 · 결과 타임아웃 · 맵 선택 케이던스)**
+> 손동작(웹캠) 조작(`handsteer/`)이 가상 Xbox 패드로 들어오는 것을 전제로 UX를 다시 맞췄다.
+> 제스처가 낼 수 있는 입력이 RT(가속) · 좌스틱 X(조향) · X+B · A 뿐이라, 그 밖의 축을 쓰던 조작을 걷어낸다.
+> 1. **드리프트 제거**: `drift` 입력·매핑·미니터보가 전부 사라졌다. 코너 차지(`kart.cornerCharge`)가
+>    `driftLevel`을 대체하고, 차지는 조향 유지만으로 쌓인다. 아래 본문의 `drift`/`driftLevel` 서술은
+>    이 항목으로 대체된다.
+> 2. **메뉴 조작**: `input.getMenuInput()`이 4방향 + confirm/cancel 엣지를 준다(WASD ∪ 방향키 ∪
+>    십자키 ∪ 좌스틱, 최초 1회 + 0.35s 후 0.13s 리피트). HUD에 포커스 박스
+>    (`setTitleFocus`/`setResultsFocus`)가 붙었다.
+> 3. **아이템전 전용**: 게임 모드(아이템전/스피드전)가 통째로 사라졌다. 모드 항목·전환 입력·
+>    `localStorage 'kart-mode'`·`hud.setGameMode`가 전부 제거되고, 아이템은 항상 켜져 있다.
+>    `itemSystem.setEnabled`는 API로 남지만 **main은 항상 `true`로만 호출한다**.
+>    그 결과 타이틀 포커스 항목은 맵 하나뿐이다(`hud.TITLE_ITEMS === 1`).
+> 4. **결과 화면 30초 타임아웃**: 결과 진입 후 30초가 지나면 자동으로 타이틀로 돌아간다.
+>    남은 시간은 `hud.setResultsTimeout(sec)`가 RESULTS 제목과 기록 목록 **사이**에 표시한다.
+>    제스처로 조작하다 멈춰도 결과 화면에 갇히지 않게 하는 장치다.
+> 5. **맵 선택 케이던스**: 좌/우를 **누르고 있는 동안 정확히 1.0초에 한 칸**만 넘어간다
+>    (첫 입력은 즉시 1회). 자세한 판정은 아래 `src/main.js` 항목 참조.
+> **맵 5종의 데이터·형상과 주행 물리는 v4와 동일하다** — 이번 변경은 전부 타이틀/결과 화면 쪽이다.
 
 > **v3 → v4 변경 (2층 오버패스 · 가변 폭 · 지름길 · 게임 모드 · 물풍선)**
 > 1. **2층(오버패스)**: `def.overpasses`가 있는 맵에서는 같은 XZ 좌표를 도로가 두 번 지나갈 수 있다.
@@ -52,7 +72,7 @@
 
 - 랩 수: 3
 - 플레이어 수: 2 (P0 = 빨강 카트, P1 = 파랑 카트)
-- 게임 모드: 아이템전(기본) / 스피드전 (v4)
+- 게임 모드 없음 — **아이템전 전용** (v5). 아이템은 항상 켜져 있다.
 - 최고 속도: 일반 주행 약 38 m/s, 부스트 시 약 55 m/s
 - 트랙 폭(halfWidth): 약 9 m
 
@@ -210,9 +230,9 @@ export class Kart {
   //       (main이 kart.usesSharedModel 플래그를 붙여 구분한다).
 
   update(dt, input, track)
-  // input: { throttle:0..1, brake:0..1, steer:-1..1, drift:boolean, useItem:boolean }
-  // 아케이드 물리: 가속/감속, 속도 비례 조향, 드리프트(drift 누르며 조향 시 미끄러지며
-  // 차지 → 3단계 미니터보: 0.8s/1.6s/2.4s 차지 시 놓으면 부스트 0.6s/1s/1.4s).
+  // input: { throttle:0..1, brake:0..1, steer:-1..1, useItem:boolean }   ★ (v5) drift 없음
+  // 아케이드 물리: 가속/감속, 속도 비례 조향, 코너 차지(v5 — 조향을 유지하면 차오르고
+  //   3단계에서 놓으면 부스트. 미끄러짐(드리프트)은 없다).
   // 트랙 처리: track.sample(pos)로 offRoad면 최고속도 40%로 제한(잔디 감속),
   //   position.y 는 매 프레임 sample().roadPoint.y (실제 노면 높이)로 맞춘다 — 경사 맵에서
   //   카트가 노면에 붙어 다닌다. 평면 맵에서는 항상 0.
@@ -235,13 +255,14 @@ export class Kart {
   // (v4) 노면 종류 배율: topSpeed *= (s.surfaceFactor ?? 1) 를 **offRoad 40% 캡 바로 앞**에
   //   곱한다. 일반 노면은 정확히 1이라 기존 맵은 IEEE754상 항등(x*1 === x)이다.
   //   계약 순서: 부스트/견인 → 경사 배율 → surfaceFactor → offRoad 캡(항상 마지막).
-  // 바퀴 회전/조향 시각화, 드리프트 시 카트 기울임.
+  // 바퀴 회전/조향 시각화, 코너링 시 카트 기울임.
 
   // 상태 (읽기용)
   position                   // THREE.Vector3 (object3d.position과 동일 참조 허용)
   speed                      // m/s
   heading                    // 라디안
-  driftLevel                 // 0|1|2|3 (현재 차지 단계, HUD/파티클용)
+  cornerCharge               // (v5) 0|1|2|3 — 코너 차지 티어. v4의 driftLevel을 대체한다.
+  chargeRatio                // (v5) 0..1 — 차지 진행률(HUD 게이지용 연속값)
   boostTimer                 // 남은 부스트 초 (>0이면 부스트 중)
   spinTimer                  // >0이면 스핀 중(조작 불능)
   catchup                    // (v4) 견인(러버밴딩) 배율. 1 = 없음. 읽기 전용. 초기값 1.
@@ -284,7 +305,7 @@ export class Kart {
   // 시각: object3d.rotation.order = 'YXZ' 로 고정하고 rotation.x 에 피치를 넣는다
   //   (pitch = atan(roadGrade) 를 초당 8의 지수 감쇠로 추종). 평면 맵은 pitch=0 →
   //   순수 yaw라 기존 'XYZ' 와 완전히 동일한 회전이다. 뱅킹(롤)은 넣지 않는다 —
-  //   rotation.z / _tiltGroup.rotation.z 는 드리프트 기울임 전용이다.
+  //   rotation.z / _tiltGroup.rotation.z 는 코너링 기울임 전용이다.
   // 물리: (a) 최고속 × clamp(1 - 1.2·roadGrade, 0.75, 1.15) — offRoad 40% 캡보다 먼저 적용,
   //       (b) 중력 성분 speed -= 14 · sin(atan(roadGrade)) · dt, 그 뒤 속도를 [-10, 66]으로 클램프.
   //       평면 맵에서는 roadGrade가 0이라 (a)는 항등이고 (b)는 통째로 건너뛴다.
@@ -328,17 +349,29 @@ export class InputManager {
   poll()
 
   getPlayerInput(i /*0|1*/)
-  // → { throttle, brake, steer, drift, useItem, pause }
+  // → { throttle, brake, steer, useItem, pause }   ★ (v5) drift 필드 없음
   //   useItem/pause는 "이번 프레임에 눌림(edge)" boolean.
   // 기본 매핑(Xbox 표준): RT=throttle, LT=brake, 좌스틱X=steer(데드존 0.15),
-  //   A 또는 RB=drift, X 또는 LB=useItem, Menu(Start)=pause.
-  // 키보드 폴백(v2):
-  //   P0 = WASD 이동 + Space(드리프트, KeyE도 허용) + ShiftLeft(아이템)
-  //   P1 = 방향키 이동 + Digit0(드리프트) + ShiftRight(아이템, Period도 허용)
+  //   X 또는 LB=useItem, Menu(Start)=pause.
+  // 키보드 폴백(v2, v5 정정):
+  //   P0 = WASD 이동 + ShiftLeft(아이템)
+  //   P1 = 방향키 이동 + ShiftRight(아이템, Period도 허용)
   //   Esc = pause(공용). 아이템은 좌/우 Shift로 플레이어를 가른다.
   // 게임패드가 연결된 플레이어는 게임패드 우선, 없으면 키보드.
+  //   ★ 패드가 꽂혀 있으면 그 슬롯은 키보드를 읽지 않는다 — 손동작(가상 패드) 사용 중에는
+  //     WASD/방향키가 steer에 실리지 않고 getMenuInput() 경로로만 들어온다.
 
-  getMapping() / setMapping(mapping)   // {steerAxis, throttle, brake, drift, useItem, pause: 버튼 인덱스}
+  getMenuInput()                       // (v5) 메뉴 조작 — 전부 이번 프레임 엣지.
+  // → { up, down, left, right, confirm, cancel }
+  //   방향 4종 = WASD ∪ 방향키 ∪ 모든 패드 십자키(12~15) ∪ 모든 패드 좌스틱(축0/1, 히스테리시스
+  //     0.55 on / 0.30 off). 최초 눌림 즉시 1회 + 0.35s 후 0.13s 간격 리피트.
+  //     ★ 리피트는 dt를 누적해 임계를 넘는 첫 프레임에 나온다 → 실제 엣지 간격은
+  //       [임계값, 임계값 + 그 프레임의 dt). main의 맵 선택이 이 성질에 의존한다.
+  //   confirm/cancel = anyStartPressed()/backPressed()와 같은 소스(리피트 없음).
+  poll(dt)                             // (v5) dt(초)를 넘겨야 메뉴 리피트가 프레임레이트와 무관해진다.
+                                       //      미전달 시 내부 performance.now() 차분으로 대체.
+
+  getMapping() / setMapping(mapping)   // {steerAxis, throttle, brake, useItem, pause: 버튼 인덱스}
                                        // Settings가 저장/복원에 사용. 두 패드 공통 매핑.
   listenForButton(callback)            // 다음에 눌리는 게임패드 버튼 인덱스를 1회 콜백 (리매핑 UI용)
   rumble(i, strong /*0..1*/, weak, ms) // 지원 시 진동, 미지원 시 무시
@@ -381,15 +414,17 @@ export class ItemSystem {
   constructor(scene, track)
   // track.itemBoxPositions에 회전하는 반투명 큐브 박스 생성. 먹으면 3초 후 리스폰.
 
-  enabled                    // (v4) 아이템전/스피드전 스위치. 기본 true.
-  setEnabled(enabled)        // (v4) false면 박스를 숨기고(_clearProjectiles로 발사체·웅덩이 전부 제거)
+  enabled                    // 아이템 활성 스위치. 기본 true.
+                             // ★ (v5) 게임 모드가 없어져 main은 항상 setEnabled(true)만 호출한다.
+                             //   아래 false 경로는 API 계약으로만 남는다(호출부 없음).
+  setEnabled(enabled)        // false면 박스를 숨기고(_clearProjectiles로 발사체·웅덩이 전부 제거)
                              // update()와 use()가 즉시 return한다(use는 kart.item도 null로 비운다).
                              // boxes/shells/bananas/balloons/puddles 배열 자체는 유지된다
                              // (main.resetItems()가 이 배열들을 직접 순회하므로).
                              // ★ 그래서 main.resetItems()는 박스 가시성을 되돌릴 때 반드시
                              //   itemSystem.enabled 를 존중해야 한다. 무조건 visible=true 로
                              //   되돌리면 update()가 !enabled 로 즉시 return하는 탓에 회전도
-                             //   부유도 하지 않는 큐브 12개가 스피드전 노면 위에 얼어붙는다.
+                             //   부유도 하지 않는 큐브 12개가 노면 위에 얼어붙는다.
 
   update(dt, karts)
   // - 박스 픽업 판정(반경 1.6m, XZ 거리): 아이템 없는 카트에 랜덤 지급 →
@@ -458,12 +493,15 @@ export class HUD {
   setMapInfo({ name, difficulty })
   // 선택된 맵 이름 — 타이틀의 ◀ 맵명 ▶ 와 레이스 중 상단 배지에 동시 반영.
   // (v4) difficulty 1|2|3 → 타이틀 맵 이름 아래 ★☆☆ / ★★☆ / ★★★. 생략 시 1. {name}만 넘기는 v3 호출도 동작한다.
-  setGameMode(mode)          // (v4) 'items' | 'speed'. 그 외 값은 'items'로 폴백.
-  // - 타이틀 모드 행(아이템전 / 스피드전)의 강조를 바꾼다. 힌트: "S / LT: 모드 전환"
-  // - speed면 아이템 가이드 카드(this.itemGuideEl)를 display:none
-  // - speed면 update()가 플레이어 패널의 itemSlot을 숨기고 아이템 획득/사용 토스트를 띄우지 않는다
-  //   (_prevItems 갱신은 계속 하므로 모드를 되돌려도 오작동하지 않는다)
-  // - 레이스 중 상단 맵 배지를 "맵명 · 스피드전"으로 병기
+  setResultsTimeout(sec)     // (v5) 결과 화면 자동 복귀까지 남은 시간(초).
+  // - RESULTS 제목과 기록 목록 **사이**에 "N초 후 타이틀로 돌아갑니다"(N = ceil(sec), 최소 0).
+  // - n <= 5 면 .urgent 강조. null/NaN이면 visibility:hidden — display:none이 아니다
+  //   (패널 높이가 튀어 결과 행이 위아래로 흔들리기 때문).
+  readonly TITLE_ITEMS       // (v5) 1 — 타이틀 포커스 항목 수(0 = 맵). main이 % 연산에 쓴다.
+  readonly RESULT_ITEMS      // (v5) 2 — 0 = 재시작, 1 = 타이틀로
+  setTitleFocus(i) / setResultsFocus(i)   // (v5) 포커스 박스 이동. 범위 밖/NaN은 0으로 클램프하고
+                                          // 실제 적용된 인덱스를 돌려준다.
+  // ★ (v5) setGameMode는 제거되었다. 아이템 가이드 카드와 플레이어 패널 itemSlot은 항상 표시된다.
   // ITEM_ICONS / ITEM_INFO / ITEM_ORDER 5종: mushroom 🍄 / shell 🐢 / banana 🍌 / star ⭐ / balloon 💧.
   // ITEM_INFO는 여전히 가이드 카드와 토스트의 단일 출처다.
 }
@@ -481,8 +519,9 @@ export class AudioEngine {
   setRaceActive(active)      // 레이스 중에만 엔진음 채널을 돌린다(타이틀/결과에서는 정지)
   provideBuffers({ sfx, engine, thruster })
   // assets.js가 디코드한 OGG를 주입. 있으면 샘플 재생, 없으면 아래 합성 폴백.
-  update(karts)              // 엔진음 2채널: 샘플 루프 또는 톱니파+로우패스, 피치는 speed에 비례,
-                             // 드리프트 시 스키드 노이즈
+  update(karts)              // 엔진음 2채널: 샘플 루프 또는 톱니파+로우패스, 피치는 speed에 비례.
+                             // ★ (v5) 스키드 노이즈 채널은 kart.driftLevel을 보는데 그 필드가
+                             //   사라져 항상 무음이다(잔여 코드 — 아래 '알려진 잔여 아티팩트' 참조).
   play(name)                 // 'count'|'go'|'pickup'|'use'|'boost'|'hit'|'lap'|'finish'|'menu'
                              // |'results'|'switch'  (11종 — 샘플과 합성 폴백 양쪽에 전부 존재)
   // 샘플이 없는 이름은 오실레이터/노이즈 합성으로 폴백하고, 둘 다 없으면 조용히 무시한다.
@@ -500,8 +539,10 @@ export class SettingsMenu {
   isOpen
   // DOM 패널 (중앙 모달). localStorage 'kart-settings'에 저장/복원.
   // 항목: 화면 분할(자동 합체/항상 분할/항상 한 화면), 볼륨, 조향 감도, 랩 수(1~5), 그래픽 품질.
-  // 버튼 리매핑 1개 이상 지원: "드리프트 버튼 변경" 클릭 → InputManager.listenForButton 연동은
-  //   main이 중계 (SettingsMenu는 onRemapRequest 콜백만 노출: constructor 옵션 { onChange, onRemapRequest }).
+  // 버튼 리매핑 UI 1개 → InputManager.listenForButton 연동은 main이 중계
+  //   (SettingsMenu는 onRemapRequest 콜백만 노출: constructor 옵션 { onChange, onRemapRequest }).
+  //   ★ (v5) 이 행은 drift 버튼을 리매핑하던 것인데 drift 입력이 사라져 **무동작**이다
+  //     (main이 setMapping({drift})를 걸어도 input.js가 읽지 않는다). 잔여 UI로 남아 있다.
   // 마우스로 조작 (게임패드 메뉴 내비게이션은 불요).
 }
 ```
@@ -609,18 +650,44 @@ export async function loadAssets(onProgress, audioContext)
   1.5초 쿨다운(`boostPadCooldowns` Map)으로 `kart.applyBoost(1, 1.2)` + 럼블. **효과음은 여기서 울리지
   않는다** — `playEventSounds()`가 `boostTimer` 상승 에지에서 이미 재생하므로 중복이 된다.
   쿨다운 Map은 `buildTrack()`(맵 재구축)과 `startCountdown()`(같은 맵 재시작) 양쪽에서 clear 해야 한다.
-- 맵 선택: 타이틀에서 P0 raw steer의 ±0.5 엣지로 순환(히스테리시스 0.3), `localStorage 'kart-map'`에
-  맵 id 저장. 타이틀 배경 프리뷰는 200ms 디바운스 후 재구축하고, Start 시 디바운스를 취소한다.
-- **(v4) 게임 모드**: `gameMode`는 `'items' | 'speed'`, `localStorage 'kart-mode'`에 저장.
-  - 타이틀에서 **P0 raw brake**(키보드 S / 패드 LT)의 0.5 상승 엣지로 토글(해제 0.2 히스테리시스).
-    brake를 쓰는 이유: `steer`는 맵 선택, `drift`는 패드 A/RB라 `anyStartPressed()`와 동시에
-    눌린다 — 세 축 중 충돌하지 않는 유일한 축이다. `input.js`는 손대지 않는다.
-  - `goToTitle()`에서 현재 brake 값으로 래치를 시딩한다(brake를 누른 채 타이틀에 들어와도 즉시 토글되지 않게).
-  - `setGameMode(m, announce)` → `itemSystem.setEnabled(m === 'items')` + `hud.setGameMode(m)` (+ 'switch' 효과음).
-  - `buildTrack()`이 `new ItemSystem(...)` 직후에 `setEnabled(gameMode === 'items')`를 다시 건다.
-  - 레이스 루프의 아이템 사용 중계는 `gameMode === 'items'` 가드로 감싼다(효과음 중복 방지).
-  - `resetItems()`는 balloons/puddles도 정리한다(웅덩이는 지오/재질까지 dispose).
-  - 스피드전에 남는 것: 드리프트 미니터보, 부스터 패드, 견인, 벽 슬라이드, 경사 물리.
+- **맵 선택 (v5)**: `updateMapSelect(dt, steerRaw, edgeDir)` 하나가 담당한다. `localStorage 'kart-map'`에
+  맵 id 저장, 타이틀 배경 프리뷰는 200ms 디바운스 후 재구축하고 Start 시 디바운스를 취소한다.
+  - **계약: 누르고 있는 동안 정확히 1.0초에 한 칸. 새 입력은 즉시 한 칸.**
+    input.js의 메뉴 리피트(0.35s 후 0.13s)를 그대로 쓰면 손으로 핸들을 기울인 채 두었을 때
+    초당 7칸이 넘어간다 — 그래서 "유지 중인가"를 main이 직접 판정한다.
+  - 입력 두 소스는 판정 방법이 다르다.
+    · **아날로그**(손 조향·좌스틱·키보드): `steerRaw` = P0/P1 raw steer 중 절댓값이 큰 쪽
+      (감도 배율을 타지 않는 값이라 설정 감도와 무관하게 동작이 같다). ±0.5 on / 0.3 off 히스테리시스로
+      래치하고, **래치가 0으로 풀린 시간이 0.15초(`MAP_RESUME_GRACE`) 미만이면 계속 유지 중**으로 본다.
+      ★ 이 유예가 핵심이다 — handsteer(`hand_steering.py`)는 스무딩 없이 매 프레임 steer를 새로 만들어
+        양손 검출이 한 번만 실패해도 0을 보낸다. 1프레임 드롭아웃을 '새로 기울였다'로 받으면
+        즉시 전환 분기가 케이던스를 통째로 우회해 초당 여러 칸이 넘어간다(수정 전 8Hz 드롭 → 초당 7.5칸).
+      · 아날로그가 잡고 있는 동안은 엣지 시계를 비워 둔다 — 같은 스틱이 만드는 메뉴 엣지로 두 칸이
+        나가지 않고, 스틱을 놓은 직후의 십자키 입력이 1초 먹통이 되지도 않는다.
+      · 방향 반전(-1↔+1)은 언제나 즉시 반영한다(A↔D 즉응 유지).
+    · **엣지**(패드 십자키 — `_readGamepad`가 axes[steerAxis]만 읽으므로 steer에 실리지 않는다):
+      `getMenuInput()` 엣지 **간격**으로 리피트를 역산한다.
+      `<= 0.13 + dt` = 리피트 확정(유지) / `[0.35, 0.35 + dt]` = 리피트 첫 타와 연타가 겹치는 구간이라
+      둘째 리피트가 올 때까지 판정 보류 / 그 밖 = 연타 확정이라 즉시 반영.
+      ★ 두 상한이 **dt에 비례**해야 한다. 고정 상수(예: 0.16)로 두면 특정 프레임레이트
+        (24fps → 0.173s, 31fps → 0.162s)에서 리피트 엣지가 창 밖으로 나가 연타로 오인되어
+        1초 케이던스가 깨진다(실측 31.2fps에서 10초에 14칸). `MENU_REPEAT_DELAY`/`MENU_REPEAT_RATE`는
+        input.js의 같은 이름 상수와 **반드시 같아야** 하고, 루프의 dt 상한(`DT_CAP` = 0.05)에도 묶여 있다.
+      · 보류 중인 칸은 버리지 않는다 — 다른 방향 엣지나 아날로그가 끼어들면 `flushPendingMapStep()`으로
+        먼저 반영한다(그냥 지우면 사용자가 누른 한 칸이 통째로 사라진다).
+  - `goToTitle()`은 현재 steer로 래치를 시딩하고 `mapHoldDir`을 함께 채운다 — 꺾은 채 결과 화면에서
+    돌아와도 즉시 한 칸이 나가지 않고 첫 전환이 진입 1.0초 뒤가 된다.
+- **(v5) 아이템전 전용**: 게임 모드 개념이 없다. `buildTrack()`이 `new ItemSystem(...)` 직후
+  `setEnabled(true)`를 걸고, 그 밖에 `setEnabled`를 호출하는 곳은 없다. 모드 전환 입력·
+  `localStorage 'kart-mode'`·`hud.setGameMode`·타이틀 모드 행은 전부 제거되었다.
+  - 타이틀 포커스 항목은 맵 하나뿐이라 `goToTitle()`에서 `hud.setTitleFocus(0)`를 한 번만 부른다
+    (매 프레임 갱신하지 않는다). `resetItems()`는 balloons/puddles도 정리한다(웅덩이는 지오/재질까지 dispose).
+- **(v5) 결과 화면 자동 복귀**: `finishRace()`가 `resultTimer = 30`(`RESULT_TIMEOUT`)으로 무장하고
+  진입 프레임에 `hud.setResultsTimeout(30)`을 한 번 그린다. `startCountdown()`/`goToTitle()`이 해제한다.
+  - `case 'finished'`의 평가 순서가 계약이다: **Start → Back → 타임아웃**. 만료되는 프레임에 Start가
+    겹치면 Start가 이긴다(제스처로 겨우 넣은 입력을 타임아웃이 삼키지 않게).
+  - 만료 시 `resultTimer = null`로 먼저 비무장한 뒤 `goToTitle()` — 같은 프레임에 두 번 타지 않는다.
+  - 설정 모달이 열려 있으면(`paused`) 상태 머신 전체가 멈추므로 카운트다운도 함께 멈춘다.
 - **(v4) 난이도 표기**: `hud.setMapInfo`의 3개 호출부(`setMapIndex` / `buildTrack` / `goToTitle`)가
   모두 `difficulty: def.difficulty ?? 1`을 함께 넘긴다.
 - pause: race 중 pause 입력 → settingsMenu.toggle() + 게임 일시정지(dt 무시).
@@ -631,7 +698,12 @@ export async function loadAssets(onProgress, audioContext)
   타깃 y와 `cam.far`에 고도 범위를 반영한다. 판별을 빼면 [x,y,z] 맵에서 y를 z로 오독해
   그림자 프러스텀이 어긋나는데 **에러가 나지 않는다**(alpine-pass 실측 z 17.1m 이탈).
 
-## 알려진 잔여 아티팩트 (v4, 수용)
+## 알려진 잔여 아티팩트 (v4/v5, 수용)
+
+- **(v5) 드리프트 제거가 남긴 사문(死文) 3곳** — 동작에는 영향이 없어 그대로 둔다.
+  · `audio.js` `_updateEngine`이 `kart.driftLevel`을 보는데 그 필드가 없어져 스키드 노이즈가 항상 무음.
+  · `main.js`가 `hud.update({ ..., driftLevel: k.driftLevel })`로 `undefined`를 넘긴다(HUD는 쓰지 않는다).
+  · `settings.js`의 "드리프트 버튼 변경" 리매핑 행 — 눌러 매핑해도 `input.js`가 `drift`를 읽지 않는다.
 
 - **합체 카메라가 데크 아래를 지날 때 (두 카트가 모두 하단일 때만 남음)**: `splitMode='auto'`에서
   **같은 층에 있는** 두 카트의 중점이 교량 데크 아래에 있으면, 합체 카메라 높이
