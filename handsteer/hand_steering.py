@@ -72,6 +72,18 @@ HANDLE_MAX_GAP = 12.0       # 이보다 넓어도 핸들 자세로 안 봄
 PUMP_WINDOW = 2.0           # 폈다 쥐었다를 이 시간(초) 안에 2회 해야 성립
 DETECT_CONFIDENCE = 0.3     # 손 최초 검출 문턱 — 주먹은 팜 디텍터가 놓치기 쉬워 낮게 잡았다
 TRACK_CONFIDENCE = 0.3      # 추적 유지 문턱
+
+# 미리보기 창에서 실시간으로 조절할 값들 — (키, 전역이름, 증감폭, 최소, 최대, 표시이름)
+# 창을 띄운 채로 숫자키를 누르면 바로 반영된다. s 를 누르면 지금 값이 콘솔에 찍히므로
+# 마음에 드는 조합을 이 파일 위쪽에 그대로 옮겨 적으면 된다.
+TUNABLES = (
+    ("1", "2", "FIST_RATIO",     0.05, 0.3,  2.5,  "fist"),
+    ("3", "4", "OPEN_RATIO",     0.05, 0.5,  3.0,  "open"),
+    ("5", "6", "HANDLE_MIN_GAP", 0.1,  0.2,  8.0,  "gapMin"),
+    ("7", "8", "HANDLE_MAX_Y",   0.02, 0.30, 1.00, "maxY"),
+    ("9", "0", "MAX_ANGLE_DEG",  2.5,  10.0, 90.0, "angle"),
+)
+_TUNE_DEFAULTS = {}
 EDGE_COOLDOWN = 0.45        # 같은 제스처가 다시 발동하기까지 최소 간격(초)
 
 HAND_MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -81,6 +93,7 @@ HAND_MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 VIEW_HEIGHT = 620           # 미리보기 창 높이(px). 화면이 작으면 줄여라.
 STREAM_PORT = 8090          # 게임 화면에 손 영상을 띄우기 위한 MJPEG 포트
 STREAM_WIDTH = 320          # 게임에 보낼 영상 가로폭(px)
+VIEW_MAX_WIDTH = 700        # 미리보기 영상의 최대 가로폭(px)
 PANEL_WIDTH = 360           # 오른쪽 상태판 폭
 BUTTON_FLASH = 0.6          # 눌린 버튼을 화면에 붙잡아 두는 시간(초)
 
@@ -233,6 +246,38 @@ def list_cameras(max_index=6):
     print(f"\n사용 가능한 인덱스: {found}")
     print("스크립트 상단의 P1_CAM_INDEX / P2_CAM_INDEX 를 원하는 번호로 바꾸면 된다.")
     print("카메라가 1대뿐이면 P2_CAM_INDEX = None 으로 두면 P1만 동작한다.")
+
+
+def snapshot_defaults():
+    g = globals()
+    for _, _, name, *_ in TUNABLES:
+        _TUNE_DEFAULTS.setdefault(name, g[name])
+
+
+def handle_tune_key(key):
+    """미리보기 창에서 누른 키로 임계값을 조절한다. 처리했으면 True."""
+    if key < 0 or key > 255:
+        return False
+    ch = chr(key)
+    g = globals()
+    for down, up, name, step, lo, hi, label in TUNABLES:
+        if ch in (down, up):
+            delta = -step if ch == down else step
+            g[name] = round(min(hi, max(lo, g[name] + delta)), 4)
+            print(f"  {label:7s} {name} = {g[name]}")
+            return True
+    if ch == "r":
+        for name, v in _TUNE_DEFAULTS.items():
+            g[name] = v
+        print("  기본값으로 되돌림")
+        return True
+    if ch == "s":
+        print("\n  ── 지금 값 (이 파일 위쪽에 그대로 옮겨 적으면 된다) ──")
+        for _, _, name, *_ in TUNABLES:
+            print(f"  {name} = {g[name]}")
+        print()
+        return True
+    return False
 
 
 def make_landmarker():
@@ -510,8 +555,16 @@ class PlayerCam:
             text(f"{mark} {g:<12} {'+'.join(btns) if btns else '-'}", y, col, 0.45)
             y += 20
 
+        # 현재 임계값 — 창에서 바로 조절할 수 있다
+        y += 6
+        g = globals()
+        parts = [f"{lab} {g[nm]:g}" for d, u, nm, st, lo, hi, lab in TUNABLES]
+        text("  ".join(parts[:3]), y, (150, 170, 150), 0.42); y += 16
+        text("  ".join(parts[3:]), y, (150, 170, 150), 0.42); y += 16
+        text("1-0 adjust   r reset   s print", y, (110, 110, 120), 0.4); y += 18
+
         # 방금 눌린 버튼 — 크게
-        y += 8
+        y += 4
         text("BUTTON", y, (150, 150, 160), 0.45); y += 26
         now = time.perf_counter()
         live = [b for b, t in self.recent_buttons.items() if now - t < BUTTON_FLASH]
@@ -524,7 +577,9 @@ class PlayerCam:
 
     def _thumb(self, panel):
         """크롭 전 원본을 작게 붙이고 크롭 영역을 표시한다 — 프레임 안에 있는지 확인용."""
-        if self.full_frame is None or CAMERA_IS_PHYSICALLY_ROTATED:
+        # 크롭이 전체 폭이면 썸네일이 본 영상과 같아 의미가 없다.
+        if (self.full_frame is None or CAMERA_IS_PHYSICALLY_ROTATED
+                or CROP_WIDTH_RATIO >= 0.999):
             return panel
         fh, fw = self.full_frame.shape[:2]
         tw = PANEL_WIDTH - 24
@@ -544,8 +599,15 @@ class PlayerCam:
     def compose(self, frame, info, fired, tune):
         frame = self._draw_hands(frame, info)
         fh, fw = frame.shape[:2]
-        scale = VIEW_HEIGHT / fh
-        view = cv2.resize(frame, (max(1, int(fw * scale)), VIEW_HEIGHT))
+        # 높이를 맞추되 폭이 과하면 폭 기준으로 줄인다(크롭 1.0 이면 16:9 라 매우 넓어진다).
+        scale = min(VIEW_HEIGHT / fh, VIEW_MAX_WIDTH / fw)
+        view = cv2.resize(frame, (max(1, int(fw * scale)), max(1, int(fh * scale))))
+        if view.shape[0] < VIEW_HEIGHT:      # 남는 위아래를 채워 패널과 높이를 맞춘다
+            pad = np.zeros((VIEW_HEIGHT, view.shape[1], 3), dtype=np.uint8)
+            pad[:] = (18, 18, 22)
+            y0 = (VIEW_HEIGHT - view.shape[0]) // 2
+            pad[y0:y0 + view.shape[0]] = view
+            view = pad
         panel = self._panel(info, fired, tune, VIEW_HEIGHT)
         panel = self._thumb(panel)
         return np.hstack([view, panel])
@@ -636,7 +698,11 @@ def main(tune=False, show_window=True):
     cams = [("P1", P1_CAM_INDEX)]
     if P2_CAM_INDEX is not None:
         cams.append(("P2", P2_CAM_INDEX))
+    snapshot_defaults()
     print(f"카메라 {len(cams)}대 사용: " + ", ".join(f"{n}=#{i}" for n, i in cams))
+    if show_window:
+        print("미리보기 창에서 조절: 1/2 fist  3/4 open  5/6 gapMin  7/8 maxY  9/0 angle"
+              "   |   r 초기화   s 현재값 출력   q 종료")
     start_stream_server()
 
     players = []
@@ -652,8 +718,11 @@ def main(tune=False, show_window=True):
                 if f is not None and show_window:
                     cv2.imshow(f"{p.name} Camera", f)
             if show_window:
-                if cv2.waitKey(1) & 0xFF == ord("q"):
+                k = cv2.waitKey(1) & 0xFF
+                if k == ord("q"):
                     break
+                if k != 255:
+                    handle_tune_key(k)
             else:
                 time.sleep(0.001)
     finally:

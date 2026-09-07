@@ -303,33 +303,6 @@ const STYLE = `
   color: #ffce54;
   text-shadow: 0 2px 6px rgba(0,0,0,0.5);
 }
-.hud-title .mode-select {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-size: 16px;
-  font-weight: 700;
-  margin-top: -6px;
-}
-.hud-title .mode-select .mode-option {
-  opacity: 0.5;
-  padding: 3px 10px;
-  border-radius: 999px;
-  transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease;
-}
-.hud-title .mode-select .mode-option.active {
-  opacity: 1;
-  background: rgba(255,255,255,0.15);
-  color: #4dd0ff;
-}
-.hud-title .mode-select .mode-sep {
-  opacity: 0.4;
-}
-.hud-title .mode-hint {
-  margin-top: -14px;
-  font-size: 12px;
-  opacity: 0.65;
-}
 .hud-title .prompt {
   font-size: 22px;
   font-weight: 700;
@@ -377,6 +350,16 @@ const STYLE = `
   font-weight: 900;
   letter-spacing: 1px;
 }
+/* 자동 복귀 카운트다운. tabular-nums가 없으면 30 → 9에서 글자 폭이 흔들린다. */
+.hud-results .result-timeout {
+  margin: -8px 0 14px 0;
+  font-size: 13px;
+  font-weight: 700;
+  opacity: 0.72;
+  letter-spacing: 0.5px;
+  font-variant-numeric: tabular-nums;
+}
+.hud-results .result-timeout.urgent { color: #ff8f6a; opacity: 1; }
 .hud-results .row {
   display: flex;
   align-items: center;
@@ -522,7 +505,7 @@ export class HUD {
     document.body.appendChild(this.root);
 
     // 메뉴 포커스 항목 수(main이 % 연산에 쓴다). 읽기 전용.
-    this.TITLE_ITEMS = 2;   // 0 = 맵, 1 = 모드
+    this.TITLE_ITEMS = 1;   // 0 = 맵
     this.RESULT_ITEMS = 2;  // 0 = 재시작, 1 = 타이틀로
 
     // Player corner panels (index 0/1)
@@ -565,20 +548,7 @@ export class HUD {
     this.mapDifficultyEl = el('div', 'map-difficulty', this.titleEl);
     this.mapDifficultyEl.textContent = '★☆☆';
     this.mapHintEl = el('div', 'map-hint', this.titleEl);
-    this.mapHintEl.textContent = 'A / D 로 변경';
-
-    // 포커스 항목 1 — 게임 모드(아이템전 / 스피드전). A/D 어느 쪽이든 토글.
-    const modeRow = el('div', 'mode-select', this.titleEl);
-    this.modeSelectEl = modeRow;
-    this.modeItemsEl = el('span', 'mode-option', modeRow);
-    this.modeItemsEl.textContent = '아이템전';
-    const modeSep = el('span', 'mode-sep', modeRow);
-    modeSep.textContent = '/';
-    this.modeSpeedEl = el('span', 'mode-option', modeRow);
-    this.modeSpeedEl.textContent = '스피드전';
-    this.modeHintEl = el('div', 'mode-hint', this.titleEl);
-    this.modeHintEl.textContent = 'A / D 로 변경';
-    this._gameMode = 'items';
+    this.mapHintEl.textContent = 'A / D 로 변경 · 누른 채 두면 1초마다';
 
     // '시작'은 포커스 항목이 아니다 — Enter는 포커스와 무관하게 항상 시작 하나를 뜻한다.
     const prompt = el('div', 'prompt', this.titleEl);
@@ -590,7 +560,7 @@ export class HUD {
       '게임패드: RT 가속 · LT 브레이크 · 좌스틱 조향 · X/LB 아이템 · Start 일시정지<br>' +
       '메뉴: W/S 항목 · A/D 값 · Enter(A) 결정 · Backspace(B) 취소';
     // 아이템 효과 안내 — 아이템이 무엇을 하는지 보여줄 곳이 없어 조작이 '먹통'처럼 느껴졌다.
-    // speed 모드에서는 아이템이 없으므로 이 카드 전체를 숨긴다(setGameMode).
+    // 아이템전 전용이므로 항상 표시한다(.item-guide의 CSS 기본값이 display:flex).
     this.itemGuideEl = el('div', 'item-guide', this.titleEl);
     for (const key of ITEM_ORDER) {
       const info = ITEM_INFO[key];
@@ -615,7 +585,7 @@ export class HUD {
     this.titleEl.style.display = 'none';
 
     // 타이틀 포커스 대상(순서 = index)
-    this._titleFocusEls = [this.mapSelectEl, this.modeSelectEl];
+    this._titleFocusEls = [this.mapSelectEl];
     this._titleFocus = 0;
 
     // 획득/사용 토스트: 플레이어별 1개. main을 거치지 않고 players[].item 변화로 직접 감지한다.
@@ -633,6 +603,9 @@ export class HUD {
     const panel = el('div', 'panel', this.resultsEl);
     this.resultsTitle = el('h2', null, panel);
     this.resultsTitle.textContent = 'RESULTS';
+    // 자동 복귀 카운트다운 — 기록 위. 손 제스처로만 조작하다 멈춰도 결과 화면에 갇히지 않게 한다.
+    this.resultsTimeoutEl = el('div', 'result-timeout', panel);
+    this.resultsTimeoutEl.style.visibility = 'hidden';
     this.resultsList = el('div', 'results-list', panel);
     // 결과 화면 포커스 항목 2개(W/S 이동, Enter 결정).
     this.resultsActionsEl = el('div', 'result-actions', panel);
@@ -649,8 +622,7 @@ export class HUD {
     this._resultFocusEls = [this.resultsRestartEl, this.resultsTitleBtnEl];
     this._resultFocus = 0;
 
-    // 초기 모드 표시(아이템전) + 초기 포커스 반영
-    this.setGameMode(this._gameMode);
+    // 초기 포커스 반영
     this.setTitleFocus(0);
     this.setResultsFocus(0);
   }
@@ -690,7 +662,7 @@ export class HUD {
     return i;
   }
 
-  // i: 0 = 맵, 1 = 모드
+  // i: 0 = 맵 (타이틀의 유일한 포커스 항목)
   setTitleFocus(i) {
     this._titleFocus = this._applyFocus(this._titleFocusEls, i, '#4dd0ff');
     return this._titleFocus;
@@ -751,13 +723,10 @@ export class HUD {
           panel.itemSlot.innerHTML = '';
         }
       }
-      // 스피드전에는 아이템이 없다 — 슬롯 자체를 숨긴다.
-      panel.itemSlot.style.display = this._gameMode === 'speed' ? 'none' : '';
-
-      // 아이템 변화 감지: null→X = 획득, X→null = 사용. 레이스 중, 아이템전에서만 띄운다.
+      // 아이템 변화 감지: null→X = 획득, X→null = 사용. 레이스 중에만 띄운다.
       const prev = this._prevItems[i] || null;
       const cur = itemKey;
-      if (cur !== prev && state === 'race' && this._gameMode === 'items') {
+      if (cur !== prev && state === 'race') {
         if (cur) this._showToast(i, cur, '획득');
         else if (prev) this._showToast(i, prev, '사용');
       }
@@ -823,6 +792,18 @@ export class HUD {
     this.resultsEl.style.display = 'none';
   }
 
+  // 결과 화면 자동 복귀까지 남은 시간(초). null/NaN이면 자리만 남기고 감춘다.
+  // display:none이 아니라 visibility를 쓰는 이유: 패널 높이가 튀어 결과 행이 위아래로 흔들린다.
+  setResultsTimeout(sec) {
+    const e = this.resultsTimeoutEl;
+    if (!e) return;
+    if (sec == null || !isFinite(sec)) { e.style.visibility = 'hidden'; return; }
+    const n = Math.max(0, Math.ceil(sec));
+    e.textContent = `${n}초 후 타이틀로 돌아갑니다`;
+    e.classList.toggle('urgent', n <= 5);
+    e.style.visibility = '';
+  }
+
   // 토스트 표시(2.0초). kind: '획득' | '사용'
   _showToast(i, itemKey, kind) {
     const t = this.toasts && this.toasts[i];
@@ -874,21 +855,6 @@ export class HUD {
     this.titleMapName.textContent = this._mapName;
     const d = Math.max(1, Math.min(3, Math.round(difficulty) || 1));
     if (this.mapDifficultyEl) this.mapDifficultyEl.textContent = '★'.repeat(d) + '☆'.repeat(3 - d);
-    this._renderMapBadge();
-  }
-
-  // 'items' | 'speed'. 타이틀 모드 강조 표시, 레이스 중 배지 병기, 아이템 가이드 노출을 갱신한다.
-  setGameMode(mode) {
-    this._gameMode = mode === 'speed' ? 'speed' : 'items';
-    const isSpeed = this._gameMode === 'speed';
-    if (this.modeItemsEl) this.modeItemsEl.classList.toggle('active', !isSpeed);
-    if (this.modeSpeedEl) this.modeSpeedEl.classList.toggle('active', isSpeed);
-    if (this.itemGuideEl) this.itemGuideEl.style.display = isSpeed ? 'none' : 'flex';
-    this._renderMapBadge();
-  }
-
-  // 상단 맵 배지: 스피드전이면 '맵명 · 스피드전'으로 병기한다.
-  _renderMapBadge() {
-    this.mapBadgeEl.textContent = this._gameMode === 'speed' ? `${this._mapName} · 스피드전` : this._mapName;
+    this.mapBadgeEl.textContent = this._mapName;   // 레이스 중 상단 배지
   }
 }

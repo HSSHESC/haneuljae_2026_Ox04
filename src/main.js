@@ -18,12 +18,12 @@ const KART_NAMES = ['P1 RED', 'P2 BLUE'];
 const KART_MODEL_KEYS = ['red', 'blue'];   // assets.karts 의 슬롯 (P0=빨강, P1=파랑)
 const COUNTDOWN_LENGTH = 4; // 3 → 2 → 1 → GO! (각 1초)
 const FINISH_FORCE_TIMEOUT = 15; // 첫 완주자 이후 나머지를 강제 DNF 처리하기까지 대기 시간(초)
+const RESULT_TIMEOUT = 30; // 결과 화면 자동 복귀(초). 손 제스처만으로 조작할 때 결과 화면에 갇히는 것을 막는다.
 
 const MAP_STORAGE_KEY = 'kart-map';
-const MAP_EDGE_ON = 0.5;   // 이 값을 넘는 순간이 "엣지" (계획 규정)
-const MAP_EDGE_OFF = 0.3;  // 여기까지 돌아와야 다음 엣지를 받는다(히스테리시스)
-
-const MODE_STORAGE_KEY = 'kart-mode';   // 'items' | 'speed'
+const MAP_HOLD_ON = 0.5;        // 이 값을 넘으면 "기울인 상태"로 본다
+const MAP_HOLD_OFF = 0.3;       // 여기까지 돌아와야 놓은 것으로 본다(히스테리시스)
+const MAP_HOLD_INTERVAL = 1.0;  // 유지하는 동안 한 칸 넘어가는 간격(초). 첫 입력은 즉시 1회.
 
 // ───────────────────────────────── 렌더러 / 씬 ─────────────────────────────────
 
@@ -96,17 +96,15 @@ let lastCountdownNum = null;
 let raceTime = 0;
 let padCount = -1;
 let finishForceTimer = null; // 첫 완주자 발생 후 카운트다운(초); null이면 미시작
+let resultTimer = null;      // 결과 화면 자동 복귀 카운트다운(초); null이면 비무장
 let prev = [];               // 효과음 edge 검출용 직전 프레임 스냅샷
 
 let mapIndex = 0;
-let mapSteerLatch = 0;       // 0 | -1 | 1 — 맵 선택 스틱 엣지 래치(구 경로, 미사용 유지)
-const TITLE_ITEMS = 2;       // 맵 / 모드
+let mapSteerLatch = 0;       // 0 | -1 | 1 — 아날로그 조향 유지 래치(히스테리시스)
+let mapHoldTimer = 0;        // 같은 방향을 유지한 시간(초)
+let mapEdgeGate = 0;         // 십자키 엣지 최소 간격 잠금(초). 유지 상태를 알 수 없는 소스용.
 const RESULT_ITEMS = 2;      // 재시작 / 타이틀로
-let titleFocus = 0;          // 0 = 맵, 1 = 모드 — W/S로 이동
 let resultFocus = 0;         // 0 = 재시작, 1 = 타이틀로
-
-let gameMode = 'items';      // 'items' | 'speed' — boot()에서 loadGameMode()로 즉시 덮어씀
-let modeBrakeLatch = false;  // 타이틀 모드 전환 브레이크(P0) 엣지 래치
 
 let mapPreviewTimer = null;         // 타이틀 배경 프리뷰 재구축 디바운스 타이머
 const MAP_PREVIEW_DEBOUNCE = 200;   // ms — 맵 연타 중 매 엣지마다 씬을 재구축하지 않도록
@@ -181,52 +179,37 @@ function cancelMapPreview() {
   if (mapPreviewTimer !== null) { clearTimeout(mapPreviewTimer); mapPreviewTimer = null; }
 }
 
-// 타이틀에서 P0 조향 입력(스틱/십자키/A·D)의 ±0.5 엣지로 맵을 순환한다.
-// 감도 배율을 타지 않은 raw steer를 쓴다 — 설정 감도가 낮아도 맵 선택은 동일하게 동작.
-function updateMapSelect(rawSteer) {
-  const s = rawSteer || 0;
-  const dir = s > 0 ? 1 : -1;
-  if (Math.abs(s) > MAP_EDGE_ON) {
-    if (mapSteerLatch !== dir) {      // 방향이 바뀌면 중립을 거치지 않아도 새 엣지로 인정(키보드 A↔D)
-      mapSteerLatch = dir;
-      setMapIndex(mapIndex + dir, true);
+// 타이틀 맵 선택. 첫 입력은 즉시 1칸, 유지하는 동안은 정확히 1.0초마다 1칸.
+// input.js의 메뉴 리피트(0.35s 후 0.13s)를 그대로 쓰면 손으로 핸들을 기울인 채 두었을 때
+// 맵이 초당 7칸씩 넘어간다. 그래서 유지 상태를 여기서 직접 잰다.
+//  - steerRaw: P0/P1 raw steer 중 절댓값이 큰 쪽(감도 배율을 타지 않은 값 — 설정 감도와 무관하게 동일 동작)
+//  - edgeDir : getMenuInput()의 left/right 엣지(패드 십자키처럼 유지 상태를 알 수 없는 소스용)
+function updateMapSelect(dt, steerRaw, edgeDir) {
+  const s = steerRaw || 0;
+  const prevLatch = mapSteerLatch;
+  if (Math.abs(s) > MAP_HOLD_ON) mapSteerLatch = s > 0 ? 1 : -1;   // 방향 전환은 중립을 거치지 않아도 인정(A↔D)
+  else if (Math.abs(s) < MAP_HOLD_OFF) mapSteerLatch = 0;
+
+  if (mapSteerLatch !== 0) {
+    if (mapSteerLatch !== prevLatch) {           // 새로 기울였다 / 방향을 바꿨다 → 즉시 1회
+      mapHoldTimer = 0;
+      setMapIndex(mapIndex + mapSteerLatch, true);
+    } else {
+      mapHoldTimer += dt;
+      if (mapHoldTimer >= MAP_HOLD_INTERVAL) {
+        mapHoldTimer -= MAP_HOLD_INTERVAL;       // = 0 이 아니라 감산 — 케이던스가 프레임마다 밀리지 않는다
+        setMapIndex(mapIndex + mapSteerLatch, true);
+      }
     }
-  } else if (Math.abs(s) < MAP_EDGE_OFF) {
-    mapSteerLatch = 0;
+    mapEdgeGate = MAP_HOLD_INTERVAL;             // 같은 입력이 엣지 경로로 다시 들어와 두 칸 가지 않게
+    return;
   }
-}
 
-// ───────────────────────────────── 게임 모드 (아이템전 / 스피드전) ─────────────────────────────────
-
-function loadGameMode() {
-  try {
-    const raw = localStorage.getItem(MODE_STORAGE_KEY);
-    return raw === 'speed' ? 'speed' : 'items';
-  } catch (e) { return 'items'; } // 프라이빗 모드 등 — 기본값
-}
-
-function saveGameMode() {
-  try { localStorage.setItem(MODE_STORAGE_KEY, gameMode); } catch (e) { /* 무시 */ }
-}
-
-function setGameMode(m, announce) {
-  gameMode = m === 'speed' ? 'speed' : 'items';
-  saveGameMode();
-  if (itemSystem && typeof itemSystem.setEnabled === 'function') itemSystem.setEnabled(gameMode === 'items');
-  if (hud && typeof hud.setGameMode === 'function') hud.setGameMode(gameMode);
-  if (announce) audio.play('switch');
-}
-
-// 타이틀에서 P0 brake(키보드 S / 패드 LT)의 0.5 상승 엣지로 모드를 순환한다.
-// steer(맵 선택)/anyStartPressed/backPressed 어느 것과도 축이 겹치지 않는 유일한 입력이라 brake를 쓴다
-// (drift는 패드 A/RB에 매핑되어 있어 anyStartPressed와 동시에 눌리는 문제가 있다 — 설계서 §E-3).
-function updateModeSelect(rawBrake) {
-  const b = rawBrake || 0;
-  if (!modeBrakeLatch && b > 0.5) {
-    modeBrakeLatch = true;
-    setGameMode(gameMode === 'items' ? 'speed' : 'items', true);
-  } else if (modeBrakeLatch && b < 0.2) {
-    modeBrakeLatch = false;
+  mapHoldTimer = 0;
+  mapEdgeGate = Math.max(0, mapEdgeGate - dt);
+  if (edgeDir !== 0 && mapEdgeGate <= 0) {       // 십자키: 엣지만 받고 1초에 한 번만 통과시킨다
+    mapEdgeGate = MAP_HOLD_INTERVAL;
+    setMapIndex(mapIndex + edgeDir, true);
   }
 }
 
@@ -289,7 +272,7 @@ function buildTrack(def) {
   applyTheme(def.theme || {});
   fitSunToTrack(def);
   itemSystem = new ItemSystem(scene, track, assets && assets.items);
-  if (typeof itemSystem.setEnabled === 'function') itemSystem.setEnabled(gameMode === 'items');
+  if (typeof itemSystem.setEnabled === 'function') itemSystem.setEnabled(true); // 아이템전 전용 — 항상 활성
   boostPadCooldowns.clear(); // 맵 재구축 시 부스트 패드 쿨다운 초기화(패드 배치가 트랙마다 다르므로)
   if (hud) hud.setMapInfo({ name: def.name, difficulty: def.difficulty ?? 1 });
 }
@@ -374,7 +357,7 @@ function respawnKartsAtSpawns() {
 
 function resetItems() {
   if (!itemSystem) return;
-  // 스피드전(setEnabled(false))에서는 박스를 계속 숨긴 채로 되돌린다.
+  // setEnabled 계약 유지(현재는 항상 true): enabled=false면 박스를 숨긴 채로 되돌린다.
   // 무조건 visible=true로 되돌리면 ItemSystem.update()가 !enabled로 즉시 빠지는 탓에
   // 회전도 부유도 하지 않는 큐브 12개가 노면 위에 얼어붙는다(CONTRACTS.md setEnabled 계약 위반).
   const boxesVisible = itemSystem.enabled !== false;
@@ -446,6 +429,7 @@ function startCountdown() {
   resetItems();
   boostPadCooldowns.clear(); // 결과 화면에서 같은 맵으로 재시작(buildTrack 미경유) 시 이전 레이스 쿨다운이 남지 않도록
   hud.hideResults();
+  resultTimer = null;
   raceTime = 0;
   countdownTimer = COUNTDOWN_LENGTH;
   lastCountdownNum = null;
@@ -465,15 +449,19 @@ function goToTitle() {
   buildKarts();
   resetItems();
   hud.hideResults();
+  resultTimer = null;
   hud.setMapInfo({ name: TRACKS[mapIndex].name, difficulty: TRACKS[mapIndex].difficulty ?? 1 });
   // 스틱/키를 꺾은 채로 타이틀에 들어오면 곧바로 맵이 넘어가지 않도록 현재 값으로 래치를 채운다.
-  const held = inputManager ? (inputManager.getPlayerInput(0).steer || 0) : 0;
-  mapSteerLatch = Math.abs(held) > MAP_EDGE_ON ? (held > 0 ? 1 : -1) : 0;
-  // 브레이크를 밟은 채로 타이틀에 들어오면 곧바로 모드가 전환되지 않도록 래치를 채운다.
-  modeBrakeLatch = (inputManager ? (inputManager.getPlayerInput(0).brake || 0) : 0) > 0.5;
+  // updateMapSelect가 P0/P1 중 절댓값이 큰 쪽을 보므로 시딩도 같은 규칙을 쓴다.
+  const heldA = inputManager ? (inputManager.getPlayerInput(0).steer || 0) : 0;
+  const heldB = inputManager ? (inputManager.getPlayerInput(1).steer || 0) : 0;
+  const held = Math.abs(heldA) >= Math.abs(heldB) ? heldA : heldB;
+  mapSteerLatch = Math.abs(held) > MAP_HOLD_ON ? (held > 0 ? 1 : -1) : 0;
+  mapHoldTimer = 0;   // 유지한 채 들어와도 첫 전환은 진입 1.0초 뒤
+  mapEdgeGate = 0;
   raceTime = 0;
   state = 'title';
-  titleFocus = 0;
+  // 타이틀 포커스 항목은 맵 하나뿐이다 — 매 프레임 갱신하지 않고 진입 시 한 번만 맞춘다.
   if (hud && typeof hud.setTitleFocus === 'function') hud.setTitleFocus(0);
   if (typeof audio.setRaceActive === 'function') audio.setRaceActive(false);
 }
@@ -527,6 +515,9 @@ function finishRace() {
     finishTime: k.finished ? k.finishTime : null,
     rank: k.rank,
   })));
+  // 결과 화면 자동 복귀 무장. 첫 프레임에 30이 바로 찍히도록 여기서 한 번 그린다.
+  resultTimer = RESULT_TIMEOUT;
+  if (typeof hud.setResultsTimeout === 'function') hud.setResultsTimeout(RESULT_TIMEOUT);
 }
 
 // ───────────────────────────────── 입력 어댑터 ─────────────────────────────────
@@ -648,24 +639,12 @@ function frame(now) {
   if (!paused) {
     switch (state) {
       case 'title': {
-        // WASD(=메뉴 입력)만으로 조작한다. W/S = 항목 이동, A/D = 값 변경, Start/Enter = 시작.
-        // 주행 입력(steer/brake)을 메뉴에 겸용하던 구 경로는 쓰지 않는다 — 축이 겹쳐 혼동됐다.
+        // 맵 선택이 유일한 항목이다. A/D(좌스틱·십자키·방향키)로 값 변경, Start/Enter로 시작.
         const menu = typeof inputManager.getMenuInput === 'function' ? inputManager.getMenuInput() : null;
-        if (menu) {
-          if (menu.up || menu.down) {
-            titleFocus = (titleFocus + (menu.down ? 1 : -1) + TITLE_ITEMS) % TITLE_ITEMS;
-            audio.play('menu');
-          }
-          const dir = menu.right ? 1 : menu.left ? -1 : 0;
-          if (dir !== 0) {
-            if (titleFocus === 0) setMapIndex(mapIndex + dir, true);
-            else setGameMode(gameMode === 'items' ? 'speed' : 'items', true);
-          }
-        } else {
-          updateMapSelect(rawA.steer);   // getMenuInput 미지원 빌드용 폴백
-          updateModeSelect(rawA.brake);
-        }
-        if (typeof hud.setTitleFocus === 'function') hud.setTitleFocus(titleFocus);
+        const edgeDir = menu ? (menu.right ? 1 : menu.left ? -1 : 0) : 0;
+        // P0/P1 어느 쪽 스틱/키로도 고를 수 있게 절댓값이 큰 쪽을 쓴다.
+        const sA = rawA.steer || 0, sB = rawB.steer || 0;
+        updateMapSelect(dt, Math.abs(sA) >= Math.abs(sB) ? sA : sB, edgeDir);
         if (startEdge) { audio.play('menu'); startSelectedMap(); }
         break;
       }
@@ -693,10 +672,9 @@ function frame(now) {
         collideKarts(karts[0], karts[1]);
         itemSystem.update(dt, karts);
         updateBoostPads(dt);
-        // 아이템 사용은 main이 중계 (useItem은 edge). 스피드전은 아이템이 없으므로 가드해
-        // 효과음이 중복 재생되지 않게 한다(itemSystem.use()는 disabled 시 no-op이지만 'use' 음은 여기서 낸다).
+        // 아이템 사용은 main이 중계 (useItem은 edge).
         for (let i = 0; i < karts.length; i++) {
-          if (gameMode === 'items' && inputs[i].useItem && karts[i].item && !karts[i].finished) {
+          if (inputs[i].useItem && karts[i].item && !karts[i].finished) {
             itemSystem.use(karts[i], karts);
             audio.play('use');
           }
@@ -731,10 +709,22 @@ function frame(now) {
           }
           if (typeof hud.setResultsFocus === 'function') hud.setResultsFocus(resultFocus);
         }
+        // Start/Back이 타임아웃보다 먼저 평가된다 — 만료 프레임에 Start가 겹치면 Start가 이긴다.
         if (startEdge) {
           audio.play('menu');
           if (resultFocus === 0) startCountdown(); else goToTitle();
-        } else if (backEdge) { audio.play('menu'); goToTitle(); }
+        } else if (backEdge) {
+          audio.play('menu'); goToTitle();
+        } else if (resultTimer !== null) {
+          // 손 제스처로 조작하다 멈춰도 결과 화면에 갇히지 않도록 30초 후 자동으로 타이틀로.
+          resultTimer -= dt;
+          if (resultTimer <= 0) {
+            resultTimer = null;   // 만료 즉시 비무장 — 같은 프레임에 두 번 타지 않는다
+            goToTitle();          // state를 'title'로 바꾸므로 다음 프레임은 이 case에 들어오지 않는다
+            break;
+          }
+          if (typeof hud.setResultsTimeout === 'function') hud.setResultsTimeout(resultTimer);
+        }
         break;
       }
     }
@@ -813,9 +803,7 @@ async function boot() {
     applySettings(settingsMenu.settings);   // 초기 반영은 'switch' 음 없이
 
     mapIndex = loadMapIndex();
-    gameMode = loadGameMode();
     buildTrack(TRACKS[mapIndex]);
-    if (typeof hud.setGameMode === 'function') hud.setGameMode(gameMode);
     goToTitle();
 
     hideLoader();
