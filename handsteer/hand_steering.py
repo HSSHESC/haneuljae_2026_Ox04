@@ -55,8 +55,12 @@ P1_CAM_INDEX = None
 P2_CAM_INDEX = None
 MAX_CAM_PROBE = 5           # 자동 탐지에서 훑어볼 인덱스 개수(0..4)
 
-CAPTURE_WIDTH = 1280
-CAPTURE_HEIGHT = 720
+# 실측(이 노트북): read 중앙값이 640x480 32ms / 960x540 64ms / 1280x720 96ms 였다.
+# 반면 MediaPipe 추론은 입력을 내부에서 줄이므로 320~1280 전 구간에서 ~25ms 로 일정하다.
+# 즉 큰 프레임은 인식률을 못 올리면서 캡처 시간만 3배로 쓴다.
+CAPTURE_WIDTH = 640
+CAPTURE_HEIGHT = 480
+PREVIEW_FPS = 20            # 미리보기 창 갱신 상한(합성이 프레임당 10ms 든다)
 
 # 가운데에서 가로폭의 이 비율만큼만 남기고 양옆을 잘라낸다.
 # 사람 한 명의 상반신과 양손이 딱 들어올 정도로 현장에서 조정할 것.
@@ -319,6 +323,58 @@ def handle_tune_key(key):
     return False
 
 
+class CameraThread:
+    """카메라를 별도 스레드에서 계속 읽어 최신 프레임만 들고 있는다.
+
+    cap.read() 는 다음 프레임이 올 때까지 블로킹한다. 메인 루프에서 직접 부르면
+    캡처(32ms)와 추론(25ms)이 직렬로 더해진다. 분리하면 둘이 겹쳐서 프레임 시간이
+    둘 중 큰 쪽으로 수렴한다.
+    """
+
+    def __init__(self, index):
+        self.cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAPTURE_WIDTH)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAPTURE_HEIGHT)
+        try:
+            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)   # 밀린 프레임을 쌓아두지 않는다
+        except cv2.error:
+            pass
+        self._lock = threading.Lock()
+        self._frame = None
+        self._seq = 0
+        self._running = self.cap.isOpened()
+        self._thread = None
+        if self._running:
+            self._thread = threading.Thread(target=self._loop, daemon=True)
+            self._thread.start()
+
+    def isOpened(self):
+        return self.cap.isOpened()
+
+    def _loop(self):
+        while self._running:
+            ok, f = self.cap.read()
+            if not ok or f is None:
+                time.sleep(0.005)
+                continue
+            with self._lock:
+                self._frame = f
+                self._seq += 1
+
+    def latest(self, since=-1):
+        """since 이후의 새 프레임이 있으면 (프레임, seq), 없으면 (None, since)."""
+        with self._lock:
+            if self._frame is None or self._seq == since:
+                return None, since
+            return self._frame, self._seq
+
+    def release(self):
+        self._running = False
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+        self.cap.release()
+
+
 def probe_cameras(max_index=None):
     """실제로 프레임이 나오는 카메라 인덱스를 순서대로 돌려준다."""
     found = []
@@ -406,9 +462,7 @@ class PlayerCam:
     def __init__(self, name, cam_index, gamepad):
         self.name = name
         self.cam_index = cam_index
-        self.cap = cv2.VideoCapture(cam_index, cv2.CAP_DSHOW)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAPTURE_WIDTH)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAPTURE_HEIGHT)
+        self.cap = CameraThread(cam_index)
         if not self.cap.isOpened():
             raise RuntimeError(f"{name}: 카메라 {cam_index} 를 열 수 없다. --list 로 확인하라.")
         self.landmarker = make_landmarker()
@@ -424,6 +478,8 @@ class PlayerCam:
         # 표시용
         self.fps = 0.0
         self._last_frame_t = time.perf_counter()
+        self._last_view_t = 0.0
+        self.last_seq = -1
         self.recent_buttons = {}   # 버튼명 → 눌린 시각 (BUTTON_FLASH 동안 표시)
         self.full_frame = None     # 크롭 전 원본 (크롭 영역 안내용)
 
@@ -678,7 +734,7 @@ class PlayerCam:
         return panel
 
     def compose(self, frame, info, fired, tune):
-        frame = self._draw_hands(frame, info)
+        # 뼈대는 step 에서 이미 그려 두었다(스트림과 같은 그림을 쓴다).
         fh, fw = frame.shape[:2]
         # 높이를 맞추되 폭이 과하면 폭 기준으로 줄인다(크롭 1.0 이면 16:9 라 매우 넓어진다).
         scale = min(VIEW_HEIGHT / fh, VIEW_MAX_WIDTH / fw)
@@ -694,9 +750,10 @@ class PlayerCam:
         return np.hstack([view, panel])
 
     def step(self, tune):
-        ok, frame = self.cap.read()
-        if not ok or frame is None:
-            return None
+        frame, seq = self.cap.latest(self.last_seq)
+        if frame is None:
+            return None          # 아직 새 프레임이 없다 — 메인 루프가 곧 다시 부른다
+        self.last_seq = seq
         now = time.perf_counter()
         dt = now - self._last_frame_t
         self._last_frame_t = now
@@ -712,7 +769,15 @@ class PlayerCam:
             for b in buttons_for(g):
                 self.recent_buttons[b] = now
 
+        # 뼈대를 먼저 그려야 게임 화면 영상에도 손이 보인다
+        # (예전에는 publish 가 compose 보다 앞서서 스트림에는 뼈대가 빠져 있었다).
+        self._draw_hands(frame, info)
         self._publish(frame, info)
+
+        # 미리보기 합성은 프레임당 10ms 든다 — 인식 주기와 분리해 상한을 둔다.
+        if now - self._last_view_t < 1.0 / PREVIEW_FPS:
+            return None
+        self._last_view_t = now
         return self.compose(frame, info, fired, tune)
 
     def _publish(self, frame, info):
@@ -811,10 +876,15 @@ def main(tune=False, show_window=True):
         if not show_window:
             print("미리보기 창 없이 실행 중 — 게임 화면 모서리의 영상으로 확인하라. 종료는 Ctrl+C.")
         while True:
+            idle = True
             for p in players:
                 f = p.step(tune)
-                if f is not None and show_window:
-                    cv2.imshow(f"{p.name} Camera", f)
+                if f is not None:
+                    idle = False
+                    if show_window:
+                        cv2.imshow(f"{p.name} Camera", f)
+            if idle:
+                time.sleep(0.002)   # 새 프레임 대기 — 바쁜 대기로 코어를 태우지 않는다
             if show_window:
                 k = cv2.waitKey(1) & 0xFF
                 if k == ord("q") or k == 27:      # q 또는 Esc
