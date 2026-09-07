@@ -5,14 +5,33 @@ Xbox 컨트롤러로 즐기는 2인 대전 3D 카트 레이싱. 브라우저에�
 
 ## 실행
 
-`index.html`을 파일로 직접 열면 ES 모듈 로딩이 막히므로 로컬 서버가 필요하다.
+```bash
+python run.py
+```
+
+웹서버를 띄우고 브라우저를 열어 준다. 손동작 조작을 쓸 때는 그것까지 함께 띄운다.
+종료는 그 창에서 Ctrl+C. 윈도우라면 `실행.bat` 을 더블클릭해도 된다.
+
+three.js는 CDN에서 받으므로 최초 실행에는 인터넷 연결이 필요하다.
+
+### 조작 방식 전환
+
+`run.py` 위쪽 한 줄로 바뀐다.
+
+```python
+HAND_STEERING = True   # 배포용 — 웹캠 손동작
+HAND_STEERING = False  # 테스트용 — 키보드 (P1: WASD / P2: 방향키)
+```
+
+`True` 인데 카메라·패키지·모델이 준비되지 않았으면 이유를 알려주고 키보드로 넘어간다.
+게임을 못 켜는 일은 없다. 배포할 때 `SHOW_PREVIEW_WINDOW = False` 로 두면 OpenCV
+미리보기 창 없이 게임 화면 안 영상만 쓴다.
+
+서버만 따로 띄우고 싶으면 예전처럼 해도 된다.
 
 ```bash
 python -m http.server 8000      # 또는: npx serve
 ```
-
-브라우저에서 <http://localhost:8000> 을 연다. three.js는 CDN에서 받으므로 최초 실행에는
-인터넷 연결이 필요하다.
 
 ## 조작
 

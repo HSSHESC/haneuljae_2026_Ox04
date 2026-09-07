@@ -26,6 +26,7 @@
   python hand_steering.py --list     연결된 카메라 인덱스 훑어보기
   python hand_steering.py --tune     패드로 아무것도 안 보내고 인식 결과만 표시
   python hand_steering.py --selftest 카메라 없이 파이프라인만 점검(패드 생성·송출)
+  python hand_steering.py --no-window 미리보기 창 없이 (게임 화면 안 영상만 씀)
 """
 
 import os
@@ -630,7 +631,7 @@ def selftest():
     print("\n자체 점검 통과. 렌즈 캡을 벗기고 그냥 실행하면 된다.")
 
 
-def main(tune=False):
+def main(tune=False, show_window=True):
     validate_map()
     cams = [("P1", P1_CAM_INDEX)]
     if P2_CAM_INDEX is not None:
@@ -643,13 +644,18 @@ def main(tune=False):
         for name, idx in cams:
             players.append(PlayerCam(name, idx, vg.VX360Gamepad()))
         print("준비 완료. 게임 창을 클릭해 포커스를 준 뒤 핸들 자세를 잡아라. 종료는 q.")
+        if not show_window:
+            print("미리보기 창 없이 실행 중 — 게임 화면 모서리의 영상으로 확인하라. 종료는 Ctrl+C.")
         while True:
             for p in players:
                 f = p.step(tune)
-                if f is not None:
+                if f is not None and show_window:
                     cv2.imshow(f"{p.name} Camera", f)
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                break
+            if show_window:
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    break
+            else:
+                time.sleep(0.001)
     finally:
         for p in players:
             p.release()
@@ -663,7 +669,7 @@ if __name__ == "__main__":
         elif "--selftest" in sys.argv:
             selftest()
         else:
-            main(tune="--tune" in sys.argv)
+            main(tune="--tune" in sys.argv, show_window="--no-window" not in sys.argv)
     except Exception:
         import traceback
         traceback.print_exc()
