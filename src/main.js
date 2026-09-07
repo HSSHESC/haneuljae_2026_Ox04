@@ -424,7 +424,6 @@ function respawnKartsAtSpawns() {
     _tmpV.set(0, 0, -1).applyQuaternion(sp.quaternion);
     k.heading = Math.atan2(-_tmpV.x, -_tmpV.z);
     k.speed = 0;
-    k.driftLevel = 0;
     k.boostTimer = 0;
     k.spinTimer = 0;
   }
@@ -820,7 +819,6 @@ function frame(now) {
       rank: k.rank || 1,
       item: k.item || null,
       speed: k.speed,
-      driftLevel: k.driftLevel,
       name: k.name,
       color: k.color,
     })),
@@ -873,7 +871,8 @@ async function boot() {
           // InputManager는 취소 개념이 없어 리스너가 계속 살아 있다. 설정 쪽에서
           // 취소/타임아웃된 리매핑은 onDone이 false를 돌려주므로 매핑을 적용하지 않는다.
           if (onDone(buttonIndex) === false) return;
-          inputManager.setMapping({ drift: buttonIndex });
+          // 드리프트가 제거돼 매핑 키에 'drift' 가 없다 — 아이템 버튼을 리매핑한다.
+          inputManager.setMapping({ useItem: buttonIndex });
           audio.play('menu');
         });
       },

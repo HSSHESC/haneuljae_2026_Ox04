@@ -1,5 +1,5 @@
 // src/settings.js
-// 설정 모달: 화면분할/볼륨/감도/랩수/품질 + 드리프트 버튼 리매핑 요청.
+// 설정 모달: 화면분할/볼륨/감도/랩수/품질 + 아이템 버튼 리매핑 요청.
 // DOM + localStorage('kart-settings'). 마우스 조작.
 
 const STORAGE_KEY = 'kart-settings';
@@ -239,7 +239,7 @@ export class SettingsMenu {
     qualRow.appendChild(qualSeg);
     panel.appendChild(qualRow);
 
-    // 드리프트 버튼 리매핑
+    // 아이템 버튼 리매핑
     const remapRow = document.createElement('div');
     remapRow.className = 'kart-settings-row';
     const remapLabel = document.createElement('label');
@@ -247,7 +247,7 @@ export class SettingsMenu {
     remapRow.appendChild(remapLabel);
     const remapBtn = document.createElement('button');
     remapBtn.className = 'kart-settings-remap-btn';
-    remapBtn.textContent = '드리프트 버튼 변경';
+    remapBtn.textContent = '아이템 버튼 변경';
     remapBtn.addEventListener('click', () => this._handleRemapClick(remapBtn));
     remapRow.appendChild(remapBtn);
     panel.appendChild(remapRow);
@@ -326,7 +326,7 @@ export class SettingsMenu {
     }
     this._remapListening = false;
     btn.classList.remove('listening');
-    btn.textContent = '드리프트 버튼 변경';
+    btn.textContent = '아이템 버튼 변경';
   }
 
   _setValue(key, value) {

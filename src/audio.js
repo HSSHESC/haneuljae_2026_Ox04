@@ -282,10 +282,10 @@ export class AudioEngine {
     }
 
     // 스키드는 합성 여부와 무관하게 항상 동일 로직.
-    const drifting = (kart.driftLevel || 0) > 0;
-    const skidTarget = drifting
-      ? 0.12 + Math.min(kart.driftLevel, 3) * 0.06
-      : 0.0001;
+    // 드리프트가 제거되면서 driftLevel 이 사라졌다 — 코너 차지 티어로 대체한다.
+    // (그대로 두면 undefined || 0 → 0 이 되어 스키드가 영원히 무음이었다)
+    const charge = Math.min(kart.cornerCharge || 0, 3);
+    const skidTarget = charge > 0 ? 0.12 + charge * 0.06 : 0.0001;
     eng.skidFilter.frequency.setTargetAtTime(1400 + t * 1200, now, 0.05);
     eng.skidGain.gain.setTargetAtTime(skidTarget * this._volumeSafety(), now, 0.08);
   }
