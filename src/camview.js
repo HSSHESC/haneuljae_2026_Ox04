@@ -90,11 +90,15 @@ class CamFeed {
 
     this.img = null;
     this.timer = null;
+    this.poll = null;
+    this.connected = false;
     document.body.appendChild(this.root);
     this.connect();
   }
 
   showPlaceholder() {
+    clearInterval(this.poll);
+    this.connected = false;
     if (this.img) {
       this.img.remove();
       this.img = null;
@@ -104,30 +108,36 @@ class CamFeed {
 
   connect() {
     clearTimeout(this.timer);
+    clearInterval(this.poll);
     if (this.img) this.img.remove();
 
     const img = document.createElement('img');
     this.img = img;
-    let settled = false;
+    this.connected = false;
 
-    // MJPEG 은 계속 열려 있는 응답이라 load 가 늦게 온다 — 첫 프레임을 못 받으면 NoCamera.
-    const giveUp = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      this.showPlaceholder();
-      this.timer = setTimeout(() => this.connect(), RETRY_MS);
-    }, CONNECT_TIMEOUT_MS);
+    // MJPEG(multipart/x-mixed-replace)는 응답이 계속 열려 있어서 브라우저가 load 를
+    // 안 주거나 늦게 줄 수 있다. load 에만 기대면 잘 나오는 영상을 지워버린다 —
+    // 실제로 프레임이 그려졌는지는 naturalWidth 로 본다.
+    const started = performance.now();
+    this.poll = setInterval(() => {
+      if (img.naturalWidth > 0) {
+        if (!this.connected) {
+          this.connected = true;
+          this.placeholder.style.display = 'none';
+        }
+        return;                       // 붙었으면 계속 지켜보기만 한다
+      }
+      if (performance.now() - started > CONNECT_TIMEOUT_MS) {
+        clearInterval(this.poll);
+        this.showPlaceholder();
+        this.timer = setTimeout(() => this.connect(), RETRY_MS);
+      }
+    }, 400);
 
-    img.onload = () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(giveUp);
-      this.placeholder.style.display = 'none';
-    };
+    // 연결 자체가 거부되면(서버 꺼짐 등) 즉시 재시도로 넘어간다.
     img.onerror = () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(giveUp);
+      if (this.connected) return;     // 스트림 도중의 오류는 무시 — 다음 프레임을 기다린다
+      clearInterval(this.poll);
       this.showPlaceholder();
       this.timer = setTimeout(() => this.connect(), RETRY_MS);
     };
