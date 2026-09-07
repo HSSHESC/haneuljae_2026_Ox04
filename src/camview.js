@@ -10,7 +10,8 @@
 
 let STREAM_ORIGIN = 'http://localhost:8090';   // runtime.json 의 streamPort 로 덮인다
 const RETRY_MS = 5000;      // 스트림이 없을 때 다시 붙어 보는 간격
-const CONNECT_TIMEOUT_MS = 4000;  // 이 시간 안에 첫 프레임이 안 오면 NoCamera
+const FRAME_MS = 80;        // 영상 갱신 주기(ms). 12.5fps — 확인용이라 이 정도면 충분하다
+const MISS_LIMIT = 25;      // 연속 실패가 이만큼 쌓이면 NoCamera 로 내린다(약 2초)
 
 const STYLE = `
 .camview {
@@ -92,6 +93,7 @@ class CamFeed {
     this.timer = null;
     this.poll = null;
     this.connected = false;
+    this.misses = 0;
     document.body.appendChild(this.root);
     this.connect();
   }
@@ -111,40 +113,37 @@ class CamFeed {
     clearInterval(this.poll);
     if (this.img) this.img.remove();
 
+    // 단일 JPEG 를 짧은 주기로 갈아 끼운다.
+    // MJPEG(multipart/x-mixed-replace)를 <img> 로 받는 방식은 브라우저·버전에 따라
+    // 아예 그려지지 않는 경우가 있어 신뢰할 수 없었다.
     const img = document.createElement('img');
     this.img = img;
     this.connected = false;
+    this.misses = 0;
+    this.root.appendChild(img);
 
-    // MJPEG(multipart/x-mixed-replace)는 응답이 계속 열려 있어서 브라우저가 load 를
-    // 안 주거나 늦게 줄 수 있다. load 에만 기대면 잘 나오는 영상을 지워버린다 —
-    // 실제로 프레임이 그려졌는지는 naturalWidth 로 본다.
-    const started = performance.now();
-    this.poll = setInterval(() => {
-      if (img.naturalWidth > 0) {
+    const tick = () => {
+      const next = new Image();
+      next.onload = () => {
+        this.misses = 0;
         if (!this.connected) {
           this.connected = true;
           this.placeholder.style.display = 'none';
         }
-        return;                       // 붙었으면 계속 지켜보기만 한다
-      }
-      if (performance.now() - started > CONNECT_TIMEOUT_MS) {
-        clearInterval(this.poll);
-        this.showPlaceholder();
-        this.timer = setTimeout(() => this.connect(), RETRY_MS);
-      }
-    }, 400);
-
-    // 연결 자체가 거부되면(서버 꺼짐 등) 즉시 재시도로 넘어간다.
-    img.onerror = () => {
-      if (this.connected) return;     // 스트림 도중의 오류는 무시 — 다음 프레임을 기다린다
-      clearInterval(this.poll);
-      this.showPlaceholder();
-      this.timer = setTimeout(() => this.connect(), RETRY_MS);
+        img.src = next.src;          // 다 받은 뒤에 바꿔야 깜빡이지 않는다
+      };
+      next.onerror = () => {
+        this.misses += 1;
+        if (this.misses >= MISS_LIMIT) {
+          this.showPlaceholder();
+          this.timer = setTimeout(() => this.connect(), RETRY_MS);
+        }
+      };
+      next.src = `${STREAM_ORIGIN}/${this.key}.jpg?t=${performance.now().toFixed(0)}`;
     };
 
-    // 캐시를 타지 않게 매번 다른 쿼리를 붙인다(재연결 시 같은 URL이면 브라우저가 재요청을 안 한다).
-    img.src = `${STREAM_ORIGIN}/${this.key}?t=${performance.now().toFixed(0)}`;
-    this.root.appendChild(img);
+    tick();
+    this.poll = setInterval(tick, FRAME_MS);
   }
 }
 

@@ -19,20 +19,23 @@ import webbrowser
 import functools
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
-# ═══════════════════════ 설정 ═══════════════════════ #
+# ╔══════════════════════ 스위치 ══════════════════════╗
+# ║  이 두 줄만 바꾸면 된다.                            ║
+# ╚═════════════════════════════════════════════════════╝
 
-# True  = 배포용. 웹캠 손동작으로 조작한다(handsteer/hand_steering.py 를 함께 띄운다).
-# False = 테스트용. 키보드로 조작한다(P1: WASD / P2: 방향키).
+# 조작 방식
+#   True  = 손동작 (배포용). 웹캠으로 조작하고 게임 화면에 손 영상이 뜬다.
+#   False = 키보드 (테스트용). P1: WASD / P2: 방향키. 카메라 칸은 아예 안 뜬다.
 HAND_STEERING = True
 
-# 손동작 조작의 OpenCV 미리보기 창을 띄울지. 게임 화면 좌상단·우상단에도 같은 영상이
-# 나오므로, 배포할 때는 False 로 두면 화면이 깔끔하다. 임계값을 맞출 때는 True 가 편하다.
-SHOW_PREVIEW_WINDOW = True
+# 인식 디버그 창 (파이썬이 따로 띄우는 OpenCV 창)
+#   True  = 띄운다. 손 뼈대·조향 막대·제스처 상태가 보이고 숫자키로 임계값을 조절할 수 있다.
+#   False = 안 띄운다. 게임 화면 모서리의 영상만 쓴다 — 배포할 때는 이쪽.
+DEBUG_WINDOW = True
 
+# ── 아래는 보통 손댈 일이 없다 ──
 PORT = 8000
 OPEN_BROWSER = True
-
-# ════════════════════════════════════════════════════ #
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 HAND_SCRIPT = os.path.join(ROOT, "handsteer", "hand_steering.py")
@@ -99,7 +102,7 @@ def start_hand_steering():
             return None
 
     args = [sys.executable, HAND_SCRIPT]
-    if not SHOW_PREVIEW_WINDOW:
+    if not DEBUG_WINDOW:
         args.append("--no-window")
     # 새 콘솔 창을 띄우지 않고 이 창에 로그를 섞어 보여준다.
     # 별도 프로세스 그룹으로 띄워야 이 창의 Ctrl+C 가 자식까지 무차별로 죽이지 않는다

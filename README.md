@@ -19,13 +19,15 @@ three.js는 CDN에서 받으므로 최초 실행에는 인터넷 연결이 필�
 `run.py` 위쪽 한 줄로 바뀐다.
 
 ```python
-HAND_STEERING = True   # 배포용 — 웹캠 손동작
-HAND_STEERING = False  # 테스트용 — 키보드 (P1: WASD / P2: 방향키)
+HAND_STEERING = True    # 손동작 (배포용) — 게임 화면 모서리에 손 영상이 뜬다
+HAND_STEERING = False   # 키보드 (테스트용) — P1: WASD / P2: 방향키, 카메라 칸 없음
+
+DEBUG_WINDOW = True     # 인식 디버그 창(OpenCV)을 띄운다. 임계값을 숫자키로 조절할 수 있다
+DEBUG_WINDOW = False    # 안 띄운다 — 배포할 때는 이쪽
 ```
 
-`True` 인데 카메라·패키지·모델이 준비되지 않았으면 이유를 알려주고 키보드로 넘어간다.
-게임을 못 켜는 일은 없다. 배포할 때 `SHOW_PREVIEW_WINDOW = False` 로 두면 OpenCV
-미리보기 창 없이 게임 화면 안 영상만 쓴다.
+`HAND_STEERING = True` 인데 카메라·패키지·모델이 준비되지 않았으면 이유를 알려주고
+키보드로 넘어간다. 게임을 못 켜는 일은 없다.
 
 서버만 따로 띄우고 싶으면 예전처럼 해도 된다.
 

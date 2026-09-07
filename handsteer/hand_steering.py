@@ -163,7 +163,30 @@ class _StreamHandler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        key = self.path.strip("/").lower()
+        raw = self.path.split("?", 1)[0].strip("/").lower()
+
+        # 단일 JPEG — <img> 로 MJPEG(multipart)를 받는 건 브라우저마다 동작이 갈린다.
+        # 게임 쪽은 이 경로를 짧은 주기로 다시 불러 쓴다(호환성이 훨씬 좋다).
+        if raw in ("p1.jpg", "p2.jpg"):
+            key = raw[:2]
+            with _frames_lock:
+                buf = _frames.get(key)
+            if buf is None:
+                self.send_error(503, "no frame yet")
+                return
+            self.send_response(200)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(buf)))
+            self.end_headers()
+            try:
+                self.wfile.write(buf)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return
+
+        key = raw
         if key not in ("p1", "p2"):
             self.send_error(404)
             return
