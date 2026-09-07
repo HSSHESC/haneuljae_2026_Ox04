@@ -15,3 +15,6 @@ desktop.ini
 # 손 인식 모델 (약 8MB) — README의 링크에서 받는다
 handsteer/hand_landmarker.task
 handsteer/__pycache__/
+
+# run.py 가 실행할 때마다 새로 쓰는 상태 파일
+runtime.json

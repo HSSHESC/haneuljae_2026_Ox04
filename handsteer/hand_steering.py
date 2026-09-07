@@ -1,7 +1,8 @@
 """
 손동작 스티어링 — 웹캠으로 손을 읽어 가상 Xbox 패드로 흘려보낸다.
 
-카메라 1대면 P1만, 2대면 P1/P2를 각각 전담시킨다. 의자가 고정되어 있고 카메라가 한
+카메라는 자동으로 찾는다 — 1대면 P1만, 2대를 꽂으면 P1/P2를 각각 전담시킨다.
+설정을 고칠 필요가 없다. 의자가 고정되어 있고 카메라가 한
 자리씩 맡으므로 얼굴 인식이나 앵커 추적이 필요 없다 — "이 카메라에 잡히는 손 = 이
 플레이어 손". 대신 가로 화각을 좁게 잘라 옆자리나 구경꾼이 프레임에 안 걸리게 한다.
 
@@ -47,9 +48,12 @@ from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision as mp_vision
 
 # ================= 카메라 ================= #
-# 카메라가 1대뿐이면 P2_CAM_INDEX = None 으로 두면 된다 (P1만 동작).
-P1_CAM_INDEX = 0
+# None 이면 자동으로 찾는다 — 꽂혀 있는 카메라를 순서대로 P1, P2 에 배정한다.
+# 1대면 P1만 돌고, 2대를 꽂으면 아무것도 안 고쳐도 P2가 따라 붙는다.
+# 좌우가 바뀌었거나 특정 캠을 고정하고 싶을 때만 숫자를 직접 적는다.
+P1_CAM_INDEX = None
 P2_CAM_INDEX = None
+MAX_CAM_PROBE = 5           # 자동 탐지에서 훑어볼 인덱스 개수(0..4)
 
 CAPTURE_WIDTH = 1280
 CAPTURE_HEIGHT = 720
@@ -244,8 +248,8 @@ def list_cameras(max_index=6):
             print(f"  [{i}] 없음")
         cap.release()
     print(f"\n사용 가능한 인덱스: {found}")
-    print("스크립트 상단의 P1_CAM_INDEX / P2_CAM_INDEX 를 원하는 번호로 바꾸면 된다.")
-    print("카메라가 1대뿐이면 P2_CAM_INDEX = None 으로 두면 P1만 동작한다.")
+    print("기본은 자동 탐지라 보통 손댈 필요가 없다.")
+    print("좌우가 바뀌었을 때만 P1_CAM_INDEX / P2_CAM_INDEX 에 번호를 직접 적어라.")
 
 
 def snapshot_defaults():
@@ -278,6 +282,48 @@ def handle_tune_key(key):
         print()
         return True
     return False
+
+
+def probe_cameras(max_index=None):
+    """실제로 프레임이 나오는 카메라 인덱스를 순서대로 돌려준다."""
+    found = []
+    for i in range(max_index if max_index is not None else MAX_CAM_PROBE):
+        cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+        try:
+            ok, frame = cap.read()
+            if ok and frame is not None:
+                found.append(i)
+        finally:
+            cap.release()
+    return found
+
+
+def resolve_cameras():
+    """설정과 탐지 결과를 합쳐 [(이름, 인덱스), ...] 를 만든다.
+
+    숫자로 못 박은 값이 있으면 그걸 우선하고, None 인 자리만 탐지 결과로 채운다.
+    """
+    fixed = [P1_CAM_INDEX, P2_CAM_INDEX]
+    if all(v is not None for v in fixed):
+        return [("P1", fixed[0]), ("P2", fixed[1])]
+
+    available = probe_cameras()
+    taken = {v for v in fixed if v is not None}
+    pool = [i for i in available if i not in taken]
+
+    out = []
+    for name, want in zip(("P1", "P2"), fixed):
+        if want is not None:
+            out.append((name, want))
+        elif pool:
+            out.append((name, pool.pop(0)))
+    if not out:
+        print("[손] 쓸 수 있는 카메라를 찾지 못했다.")
+    else:
+        print(f"[손] 카메라 {len(out)}대 발견: "
+              + ", ".join(f"{n}=#{i}" for n, i in out)
+              + ("  (전체 탐지: " + str(available) + ")" if available else ""))
+    return out
 
 
 def make_landmarker():
@@ -695,11 +741,11 @@ def selftest():
 
 def main(tune=False, show_window=True):
     validate_map()
-    cams = [("P1", P1_CAM_INDEX)]
-    if P2_CAM_INDEX is not None:
-        cams.append(("P2", P2_CAM_INDEX))
+    cams = resolve_cameras()
+    if not cams:
+        print("카메라가 없어 손동작 조작을 시작할 수 없다. 키보드로 플레이하라.")
+        return
     snapshot_defaults()
-    print(f"카메라 {len(cams)}대 사용: " + ", ".join(f"{n}=#{i}" for n, i in cams))
     if show_window:
         print("미리보기 창에서 조절: 1/2 fist  3/4 open  5/6 gapMin  7/8 maxY  9/0 angle"
               "   |   r 초기화   s 현재값 출력   q 종료")

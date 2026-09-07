@@ -36,6 +36,18 @@ OPEN_BROWSER = True
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 HAND_SCRIPT = os.path.join(ROOT, "handsteer", "hand_steering.py")
+RUNTIME_JSON = os.path.join(ROOT, "runtime.json")
+
+
+def write_runtime(hand_on, cameras):
+    """게임(camview.js)이 읽어 갈 현재 실행 상태. 손동작이 꺼져 있으면 카메라 칸을 아예 안 띄운다."""
+    import json
+    data = {"handSteering": bool(hand_on), "cameras": int(cameras), "streamPort": 8090}
+    try:
+        with open(RUNTIME_JSON, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except OSError as e:
+        print(f"[웹] runtime.json 을 쓰지 못했다: {e}")
 
 
 class QuietHandler(SimpleHTTPRequestHandler):
@@ -114,9 +126,14 @@ def main():
         if proc is None:
             print("[손] 손동작 조작을 띄우지 못했다. 키보드로도 플레이할 수 있다.")
             print("     (P1: WASD / P2: 방향키)")
+            write_runtime(False, 0)
+        else:
+            # 카메라 대수는 hand_steering 이 자동 탐지한다. 게임에는 최대치(2)를 알려 두고,
+            # 실제로 스트림이 오는 칸만 영상이 붙는다(안 오는 칸은 NoCamera).
+            write_runtime(True, 2)
     else:
         print("[손] 꺼져 있음 — 키보드로 조작한다. P1: WASD / P2: 방향키")
-        print("     게임 화면 모서리에는 NoCamera 가 표시된다.")
+        write_runtime(False, 0)
 
     if OPEN_BROWSER:
         time.sleep(0.6)

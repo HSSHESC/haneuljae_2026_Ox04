@@ -8,7 +8,7 @@
 //
 // 게임 로직과 완전히 분리돼 있다(모듈 간 import 없음). index.html 이 직접 불러온다.
 
-const STREAM_ORIGIN = 'http://localhost:8090';
+let STREAM_ORIGIN = 'http://localhost:8090';   // runtime.json 의 streamPort 로 덮인다
 const RETRY_MS = 5000;      // 스트림이 없을 때 다시 붙어 보는 간격
 const CONNECT_TIMEOUT_MS = 4000;  // 이 시간 안에 첫 프레임이 안 오면 NoCamera
 
@@ -85,7 +85,7 @@ class CamFeed {
     this.placeholder = document.createElement('div');
     this.placeholder.className = 'nocam';
     this.placeholder.innerHTML = '<div>NoCamera</div>'
-      + '<div class="sub">hand_steering.py 를 실행하면 연결됩니다</div>';
+      + '<div class="sub">카메라 연결 대기 중</div>';
     this.root.appendChild(this.placeholder);
 
     this.img = null;
@@ -138,11 +138,30 @@ class CamFeed {
   }
 }
 
-function init() {
+// run.py 가 남기는 실행 상태. 손동작이 꺼져 있으면(키보드 디버그 모드) 카메라 칸을
+// 아예 띄우지 않는다 — 없는 기능의 자리가 화면에 남아 있으면 고장으로 읽힌다.
+async function readRuntime() {
+  try {
+    const res = await fetch(`runtime.json?t=${Date.now()}`, { cache: 'no-store' });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (e) {
+    return null;   // 파일이 없으면(서버만 따로 띄운 경우) 아래 기본값으로 간다
+  }
+}
+
+async function init() {
   injectStyle();
-  // eslint-disable-next-line no-new
-  new CamFeed('p1', 'P1');
-  new CamFeed('p2', 'P2');
+  const rt = await readRuntime();
+
+  // runtime.json 이 없으면 손동작을 쓰는 것으로 보고 붙여 본다(스트림이 없으면 NoCamera).
+  const handOn = rt ? rt.handSteering !== false : true;
+  if (rt && rt.streamPort) STREAM_ORIGIN = `http://localhost:${rt.streamPort}`;
+  if (!handOn) return;
+
+  const feeds = [new CamFeed('p1', 'P1')];
+  if (!rt || (rt.cameras ?? 2) >= 2) feeds.push(new CamFeed('p2', 'P2'));
+  return feeds;
 }
 
 if (document.readyState === 'loading') {
